@@ -43,9 +43,13 @@
   #gallery.active{display:block;}
   #gallery h3{margin:0 0 6px;font-size:12px;}
   .clip{padding:6px;margin-bottom:4px;background:#1c1c1c;border-radius:5px;display:flex;
-    justify-content:space-between;}
+    align-items:center;justify-content:space-between;gap:6px;}
   .clip.sel{background:#3a3050;}
+  .clip .info{display:flex;flex:1;justify-content:space-between;overflow:hidden;}
   .clip .badge{opacity:.6;}
+  .clipDelete{flex-shrink:0;width:20px;height:20px;border-radius:4px;
+    border:1px solid rgba(224,59,59,.4);background:rgba(224,59,59,.15);color:#ff6b6b;
+    font-size:11px;line-height:1;display:flex;align-items:center;justify-content:center;}
   #galleryHint{font-size:9px;opacity:.7;margin-top:4px;}
   #galleryEmpty{opacity:.6;padding:10px 0;}
 
@@ -73,7 +77,7 @@
   <h3>Saved clips</h3>
   <div id="clipList"></div>
   <div id="galleryEmpty" style="display:none;">No clips yet</div>
-  <div id="galleryHint">scroll: browse &middot; PTT: play &middot; hold: back</div>
+  <div id="galleryHint">scroll: browse &middot; PTT: play &middot; tap &#10005;: delete &middot; hold: back</div>
 </div>
 
 <div id="player">
@@ -484,9 +488,33 @@ function renderGallery() {
   clips.forEach((c, i) => {
     const div = document.createElement('div');
     div.className = 'clip' + (i === selIndex ? ' sel' : '');
-    div.innerHTML = `<span>${c.ts}</span><span class="badge">${c.mode}</span>`;
+    const info = document.createElement('span');
+    info.className = 'info';
+    info.innerHTML = `<span>${c.ts}</span><span class="badge">${c.mode}</span>`;
+    div.appendChild(info);
+    const delBtn = document.createElement('button');
+    delBtn.className = 'clipDelete';
+    delBtn.textContent = '✕';
+    delBtn.title = 'delete clip';
+    delBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      if (confirm('Delete this clip?')) deleteClip(c.id);
+    });
+    div.appendChild(delBtn);
     els.clipList.appendChild(div);
   });
+}
+
+async function deleteClip(id) {
+  await new Promise((res, rej) => {
+    const tx = db.transaction(STORE, 'readwrite');
+    tx.objectStore(STORE).delete(id);
+    tx.oncomplete = res; tx.onerror = () => rej(tx.error);
+  });
+  const idx = clips.findIndex((c) => c.id === id);
+  if (idx !== -1) clips.splice(idx, 1);
+  if (selIndex >= clips.length) selIndex = Math.max(0, clips.length - 1);
+  renderGallery();
 }
 
 function playSelected() {
