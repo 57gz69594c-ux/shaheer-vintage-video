@@ -13,12 +13,13 @@
   video#src{display:none;}
   canvas#preview{width:100%;height:100%;object-fit:cover;display:block;background:#000;}
 
-  #modeLabel{position:absolute;top:6px;left:50%;transform:translateX(-50%);
+  #modeLabel{position:absolute;bottom:14px;left:8px;
     background:rgba(20,20,20,.75);border:1px solid rgba(255,255,255,.2);border-radius:999px;
     padding:4px 10px;font-size:10px;letter-spacing:.06em;font-weight:600;text-align:center;}
   #modeLabel .stock{display:block;font-size:8px;font-weight:400;opacity:.65;letter-spacing:.04em;}
 
-  #recIndicator{position:absolute;top:8px;left:8px;display:none;align-items:center;gap:4px;
+  #recIndicator{position:absolute;top:6px;left:50%;transform:translateX(-50%);
+    display:none;align-items:center;gap:4px;
     background:rgba(0,0,0,.55);border-radius:999px;padding:3px 7px;font-size:10px;
     font-variant-numeric:tabular-nums;}
   #recIndicator.on{display:flex;}
@@ -70,7 +71,7 @@
   <button id="rotateBtn" title="rotate feed 90°">&#8635;</button>
   <button id="galleryBtn">&#9638;</button>
   <button id="shutterBtn" aria-label="record"></button>
-  <div id="hint">PTT: rec &middot; scroll: 16/8mm &middot; hold: gallery</div>
+  <div id="hint">PTT: rec &middot; scroll: front/back cam &middot; hold: gallery</div>
 </div>
 
 <div id="gallery">
@@ -112,6 +113,18 @@ function setRotation(deg) {
   rotation = ((deg % 360) + 360) % 360;
   localStorage.setItem('r1-film-rotation', String(rotation));
 }
+
+// ---------- front/selfie camera ----------
+// Confirmed on the sibling photo creation (shaheer-cam): requesting the
+// opposite facingMode via getUserMedia actually drives the R1's motorized
+// camera to physically rotate and face the user, not just a software mirror.
+// The scroll wheel drives that directly here — up = selfie, down = back
+// camera — and film-stock switching moved to the on-screen pill instead so
+// the two controls never compete for the wheel.
+let cachedFacing = localStorage.getItem('r1-film-facing') || 'environment';
+function getFacing() { return cachedFacing; }
+function setFacing(v) { cachedFacing = v; localStorage.setItem('r1-film-facing', v); }
+function isSelfieMode() { return cachedFacing === 'user'; }
 
 const PRESETS = {
   16: {
@@ -176,6 +189,7 @@ function drawFilmFrame(source, sw, sh, weave) {
   rotCtx.save();
   rotCtx.translate(rw / 2 + weave.x * rw, rh / 2 + weave.y * rh);
   rotCtx.rotate((rotation * Math.PI) / 180 + weave.rot);
+  if (isSelfieMode()) rotCtx.scale(-1, 1);
   rotCtx.drawImage(source, -sw / 2, -sh / 2, sw, sh);
   rotCtx.restore();
 
@@ -341,17 +355,22 @@ function setMode(m) {
 let cameraStream = null, micStream = null;
 
 function buildCameraAttempts() {
+  const facing = getFacing();
   const fr = { ideal: 24, max: 30 };
   const res = { width: { ideal: 1280, min: 1280 }, height: { ideal: 720, min: 720 } };
   return [
-    { video: { facingMode: { ideal: 'environment' }, frameRate: fr, ...res } },
+    { video: { facingMode: { ideal: facing }, frameRate: fr, ...res } },
     { video: { frameRate: fr, ...res } },
-    { video: { facingMode: { ideal: 'environment' } } },
+    { video: { facingMode: { ideal: facing } } },
     { video: true },
   ];
 }
 
 async function initCamera() {
+  if (cameraStream) {
+    cameraStream.getTracks().forEach((t) => t.stop());
+    cameraStream = null;
+  }
   let lastErr = null;
   for (const constraints of buildCameraAttempts()) {
     try {
@@ -504,8 +523,26 @@ els.galleryBtn.addEventListener('click', () => setView(appView === 'camera' ? 'g
 els.modeLabel.addEventListener('click', () => setMode(mode === 16 ? 8 : 16));
 els.rotateBtn.addEventListener('click', () => setRotation(rotation + 90));
 
+// Cooldown after a flip — carried over from the sibling photo creation,
+// where the camera-flip motor settling into position was found to generate
+// a phantom wheel-encoder tick some time later, which without this guard
+// gets treated as a real scroll and flips the camera right back.
+let lastFlipAt = 0;
+const FLIP_COOLDOWN_MS = 5000;
+function flipToFacing(target) {
+  if (getFacing() === target) return;
+  const now = Date.now();
+  if (now - lastFlipAt < FLIP_COOLDOWN_MS) return;
+  lastFlipAt = now;
+  setFacing(target);
+  initCamera();
+}
+
 /* ---------- R1 hardware hooks ---------- */
 // PTT short press: sideClick. Long press: longPressStart. Scroll wheel: scrollUp/scrollDown.
+// Scroll drives the camera flip (up = selfie, down = back), matching the
+// sibling photo creation — film-stock switching lives on the on-screen pill
+// instead so the two controls never compete for the wheel.
 window.addEventListener('sideClick', () => {
   if (appView === 'camera') toggleRecording();
   else if (appView === 'gallery') playSelected();
@@ -516,19 +553,20 @@ window.addEventListener('longPressStart', () => {
   else if (appView === 'camera') setView('gallery');
 });
 window.addEventListener('scrollUp', () => {
-  if (appView === 'camera') setMode(8);
+  if (appView === 'camera') flipToFacing('user');
   else if (appView === 'gallery' && clips.length) { selIndex = Math.max(0, selIndex - 1); renderGallery(); }
 });
 window.addEventListener('scrollDown', () => {
-  if (appView === 'camera') setMode(16);
+  if (appView === 'camera') flipToFacing('environment');
   else if (appView === 'gallery' && clips.length) { selIndex = Math.min(clips.length - 1, selIndex + 1); renderGallery(); }
 });
 
 /* ---------- keyboard fallback for desktop testing ---------- */
 document.addEventListener('keydown', (e) => {
   if (e.code === 'Space') { if (!e.repeat) { e.preventDefault(); toggleRecording(); } }
-  else if (e.code === 'ArrowLeft') { if (appView === 'gallery') { selIndex = Math.max(0, selIndex - 1); renderGallery(); } else setMode(16); }
-  else if (e.code === 'ArrowRight') { if (appView === 'gallery') { selIndex = Math.min(clips.length - 1, selIndex + 1); renderGallery(); } else setMode(8); }
+  else if (e.code === 'ArrowLeft') { if (appView === 'gallery') { selIndex = Math.max(0, selIndex - 1); renderGallery(); } else flipToFacing('user'); }
+  else if (e.code === 'ArrowRight') { if (appView === 'gallery') { selIndex = Math.min(clips.length - 1, selIndex + 1); renderGallery(); } else flipToFacing('environment'); }
+  else if (e.key === 'm') setMode(mode === 16 ? 8 : 16);
   else if (e.key === 'g') setView(appView === 'camera' ? 'gallery' : 'camera');
   else if (e.key === 'Enter') { if (appView === 'gallery') playSelected(); }
   else if (e.key === 'Escape') { if (appView !== 'camera') setView('camera'); }
