@@ -50,6 +50,22 @@
   .clipDelete{flex-shrink:0;width:20px;height:20px;border-radius:4px;
     border:1px solid rgba(224,59,59,.4);background:rgba(224,59,59,.15);color:#ff6b6b;
     font-size:11px;line-height:1;display:flex;align-items:center;justify-content:center;}
+  .clipShare{flex-shrink:0;width:26px;height:20px;border-radius:4px;
+    border:1px solid rgba(226,192,132,.5);background:rgba(226,192,132,.15);color:#e2c084;
+    font-size:8px;font-weight:700;letter-spacing:.03em;line-height:1;
+    display:flex;align-items:center;justify-content:center;}
+
+  #share{display:none;padding:14px 10px;height:100%;box-sizing:border-box;
+    flex-direction:column;align-items:center;text-align:center;}
+  #share.active{display:flex;}
+  #share h3{margin:6px 0 10px;font-size:12px;}
+  #shareStatus{font-size:11px;opacity:.85;}
+  #shareError{font-size:10px;color:#ff6b6b;padding:0 6px;}
+  #shareQrWrap{display:flex;flex-direction:column;align-items:center;gap:6px;}
+  #shareImg{border-radius:8px;background:#fff;padding:6px;display:block;}
+  #shareUrl{font-size:8px;opacity:.4;word-break:break-all;max-width:200px;}
+  #shareExpiry{font-size:9px;opacity:.6;}
+  #shareHint{font-size:9px;opacity:.6;margin-top:auto;padding-top:10px;}
   #galleryHint{font-size:9px;opacity:.7;margin-top:4px;}
   #galleryEmpty{opacity:.6;padding:10px 0;}
 
@@ -83,6 +99,18 @@
 <div id="player">
   <video id="playback" controls playsinline></video>
   <div id="playerHint">PTT: back to camera</div>
+</div>
+
+<div id="share">
+  <h3>Share clip</h3>
+  <div id="shareStatus">Uploading&hellip; 0%</div>
+  <div id="shareError" style="display:none;"></div>
+  <div id="shareQrWrap" style="display:none;">
+    <img id="shareImg" width="170" height="170" alt="Download QR code">
+    <div id="shareUrl"></div>
+    <div id="shareExpiry">Link expires in 1 hour</div>
+  </div>
+  <div id="shareHint">PTT: back to gallery &middot; hold: camera</div>
 </div>
 
 <script>
@@ -146,6 +174,12 @@ const PRESETS = {
 };
 let mode = 16;
 
+// Default expiry for share-via-QR uploads (see shareClip below) — shortest
+// option since that's plenty of time to scan-and-download right after
+// recording; change this one line to make links live longer.
+const SHARE_EXPIRY = '1h';
+const SHARE_EXPIRY_LABEL = 'Link expires in 1 hour';
+
 /* ---------- elements ---------- */
 const els = {
   camera: document.getElementById('camera'),
@@ -164,7 +198,15 @@ const els = {
   clipList: document.getElementById('clipList'),
   galleryEmpty: document.getElementById('galleryEmpty'),
   playback: document.getElementById('playback'),
+  share: document.getElementById('share'),
+  shareStatus: document.getElementById('shareStatus'),
+  shareError: document.getElementById('shareError'),
+  shareQrWrap: document.getElementById('shareQrWrap'),
+  shareImg: document.getElementById('shareImg'),
+  shareUrl: document.getElementById('shareUrl'),
+  shareExpiry: document.getElementById('shareExpiry'),
 };
+els.shareExpiry.textContent = SHARE_EXPIRY_LABEL;
 const previewCtx = els.preview.getContext('2d');
 
 function showError(msg) { els.err.textContent = msg; els.err.style.display = 'block'; }
@@ -492,6 +534,15 @@ function renderGallery() {
     info.className = 'info';
     info.innerHTML = `<span>${c.ts}</span><span class="badge">${c.mode}</span>`;
     div.appendChild(info);
+    const shareBtn = document.createElement('button');
+    shareBtn.className = 'clipShare';
+    shareBtn.textContent = 'QR';
+    shareBtn.title = 'share via QR code';
+    shareBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      shareClip(c);
+    });
+    div.appendChild(shareBtn);
     const delBtn = document.createElement('button');
     delBtn.className = 'clipDelete';
     delBtn.textContent = '✕';
@@ -517,6 +568,58 @@ async function deleteClip(id) {
   renderGallery();
 }
 
+/* ---------- share via QR (upload to an anonymous, auto-expiring temp host) ----------
+   R1 Creations run in a browser sandbox with no way to host a local file
+   server, so there's no way to hand the phone the clip directly — it has to
+   briefly become reachable at a URL. litterbox.catbox.moe needs no account
+   or API key (nothing to leak in this publicly-served page) and every link
+   self-deletes after the chosen window (SHARE_EXPIRY, set above). */
+function uploadWithProgress(form, onProgress) {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open('POST', 'https://litterbox.catbox.moe/resources/internals/api.php');
+    xhr.upload.onprogress = (e) => {
+      if (e.lengthComputable) onProgress(Math.round((e.loaded / e.total) * 100));
+    };
+    xhr.onload = () => {
+      const text = (xhr.responseText || '').trim();
+      if (xhr.status >= 200 && xhr.status < 300 && text.indexOf('http') === 0) resolve(text);
+      else reject(new Error('server error (' + xhr.status + ')'));
+    };
+    xhr.onerror = () => reject(new Error('network error'));
+    xhr.send(form);
+  });
+}
+
+async function shareClip(clip) {
+  setView('share');
+  els.shareStatus.style.display = 'block';
+  els.shareStatus.textContent = 'Uploading… 0%';
+  els.shareError.style.display = 'none';
+  els.shareQrWrap.style.display = 'none';
+
+  const ext = clip.blob.type.indexOf('mp4') !== -1 ? 'mp4' : 'webm';
+  const filename = `${clip.mode.toLowerCase()}-${clip.id}.${ext}`;
+  const form = new FormData();
+  form.append('reqtype', 'fileupload');
+  form.append('time', SHARE_EXPIRY);
+  form.append('fileToUpload', clip.blob, filename);
+
+  try {
+    const url = await uploadWithProgress(form, (pct) => {
+      els.shareStatus.textContent = `Uploading… ${pct}%`;
+    });
+    els.shareStatus.style.display = 'none';
+    els.shareUrl.textContent = url;
+    els.shareImg.src = 'https://api.qrserver.com/v1/create-qr-code/?size=170x170&data=' + encodeURIComponent(url);
+    els.shareQrWrap.style.display = 'flex';
+  } catch (e) {
+    els.shareStatus.style.display = 'none';
+    els.shareError.style.display = 'block';
+    els.shareError.textContent = 'Upload failed: ' + e.message + ' — try again?';
+  }
+}
+
 function playSelected() {
   const c = clips[selIndex];
   if (!c) return;
@@ -526,12 +629,13 @@ function playSelected() {
 }
 
 /* ---------- view switching ---------- */
-let appView = 'camera'; // camera | gallery | player
+let appView = 'camera'; // camera | gallery | player | share
 function setView(v) {
   appView = v;
   els.camera.classList.toggle('active', v === 'camera');
   els.gallery.classList.toggle('active', v === 'gallery');
   els.player.classList.toggle('active', v === 'player');
+  els.share.classList.toggle('active', v === 'share');
   if (v === 'gallery') renderGallery();
   if (v !== 'player') { els.playback.pause(); }
 }
@@ -565,9 +669,10 @@ window.addEventListener('sideClick', () => {
   if (appView === 'camera') toggleRecording();
   else if (appView === 'gallery') playSelected();
   else if (appView === 'player') setView('camera');
+  else if (appView === 'share') setView('gallery');
 });
 window.addEventListener('longPressStart', () => {
-  if (appView === 'gallery' || appView === 'player') setView('camera');
+  if (appView === 'gallery' || appView === 'player' || appView === 'share') setView('camera');
   else if (appView === 'camera') setView('gallery');
 });
 window.addEventListener('scrollUp', () => {
