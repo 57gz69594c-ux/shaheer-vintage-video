@@ -1,0 +1,51 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Install 16/8mm Film Video</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body {
+  background: #0e0e10; color: #fff;
+  font-family: -apple-system, sans-serif;
+  min-height: 100vh;
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  padding: 32px;
+}
+h1 { font-size: 22px; font-weight: 700; margin-bottom: 8px; }
+p { font-size: 14px; color: rgba(255,255,255,0.45); margin-bottom: 32px; text-align: center; }
+#qr { margin-bottom: 20px; }
+.url { font-size: 11px; color: rgba(255,255,255,0.25); word-break: break-all; text-align: center; max-width: 300px; }
+</style>
+</head>
+<body>
+<h1>16/8mm Film Video</h1>
+<p>On your rabbit r1: open Creations &rarr; add via QR code &rarr; scan this.</p>
+<div id="qr"></div>
+<div class="url" id="url-label"></div>
+<script src="https://unpkg.com/qr-code-styling@1.6.0/lib/qr-code-styling.js"></script>
+<script>
+  var creationUrl = 'https://57gz69594c-ux.github.io/shaheer-vintage-video/?v=1';
+  document.getElementById('url-label').textContent = creationUrl;
+
+  var qrData = JSON.stringify({
+    title: "16/8mm Film Video",
+    url: creationUrl,
+    description: "Real-time 16mm & 8mm film-look video camera — grain, gate weave, halation, vignette, no light leaks",
+    iconUrl: "",
+    themeColor: "#e2c084"
+  });
+
+  var qrCode = new QRCodeStyling({
+    width: 260, height: 260,
+    data: qrData,
+    dotsOptions: { color: "#ffffff", type: "rounded" },
+    backgroundOptions: { color: "#0e0e10" },
+    cornersSquareOptions: { color: "#e2c084", type: "extra-rounded" },
+    cornersDotOptions: { color: "#e2c084" }
+  });
+  qrCode.append(document.getElementById('qr'));
+</script>
+</body>
+</html>
