@@ -1,0 +1,532 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=240, initial-scale=1, user-scalable=no">
+<title>16/8mm Film Video</title>
+<style>
+  html,body{margin:0;padding:0;width:240px;height:282px;background:#000;color:#fff;
+    font-family:-apple-system,sans-serif;overflow:hidden;font-size:11px;
+    -webkit-tap-highlight-color:transparent;}
+  #camera{width:100%;height:100%;position:relative;display:none;}
+  #camera.active{display:block;}
+  video#src{display:none;}
+  canvas#preview{width:100%;height:100%;object-fit:cover;display:block;background:#000;}
+
+  #modeLabel{position:absolute;top:6px;left:50%;transform:translateX(-50%);
+    background:rgba(20,20,20,.75);border:1px solid rgba(255,255,255,.2);border-radius:999px;
+    padding:4px 10px;font-size:10px;letter-spacing:.06em;font-weight:600;text-align:center;}
+  #modeLabel .stock{display:block;font-size:8px;font-weight:400;opacity:.65;letter-spacing:.04em;}
+
+  #recIndicator{position:absolute;top:8px;left:8px;display:none;align-items:center;gap:4px;
+    background:rgba(0,0,0,.55);border-radius:999px;padding:3px 7px;font-size:10px;
+    font-variant-numeric:tabular-nums;}
+  #recIndicator.on{display:flex;}
+  #recDot{width:7px;height:7px;border-radius:50%;background:#e03b3b;animation:blink 1s infinite;}
+  @keyframes blink{50%{opacity:.2;}}
+
+  #galleryBtn{position:absolute;top:6px;right:6px;width:24px;height:24px;border-radius:50%;
+    background:rgba(20,20,20,.75);border:1px solid rgba(255,255,255,.2);color:#eee;
+    font-size:12px;display:flex;align-items:center;justify-content:center;}
+
+  #hint{position:absolute;bottom:3px;left:0;right:0;text-align:center;font-size:9px;opacity:.6;}
+
+  #shutterBtn{position:absolute;bottom:16px;left:50%;transform:translateX(-50%);
+    width:44px;height:44px;border-radius:50%;background:#fff;border:3px solid rgba(255,255,255,.35);}
+  #shutterBtn.recording{background:#e03b3b;}
+
+  #err{position:absolute;top:0;left:0;right:0;padding:8px;background:#500;font-size:10px;
+    display:none;z-index:10;}
+
+  #gallery{display:none;padding:8px;height:100%;box-sizing:border-box;overflow-y:auto;}
+  #gallery.active{display:block;}
+  #gallery h3{margin:0 0 6px;font-size:12px;}
+  .clip{padding:6px;margin-bottom:4px;background:#1c1c1c;border-radius:5px;display:flex;
+    justify-content:space-between;}
+  .clip.sel{background:#3a3050;}
+  .clip .badge{opacity:.6;}
+  #galleryHint{font-size:9px;opacity:.7;margin-top:4px;}
+  #galleryEmpty{opacity:.6;padding:10px 0;}
+
+  #player{display:none;width:100%;height:100%;background:#000;}
+  #player.active{display:block;}
+  #player video{width:100%;height:85%;background:#000;}
+  #playerHint{font-size:9px;text-align:center;opacity:.7;}
+</style>
+</head>
+<body>
+
+<div id="err"></div>
+
+<div id="camera" class="active">
+  <video id="src" autoplay muted playsinline></video>
+  <canvas id="preview"></canvas>
+  <div id="modeLabel"><span class="name">16MM</span><span class="stock">KODAK VISION3 &middot; 24FPS</span></div>
+  <div id="recIndicator"><div id="recDot"></div><span id="recTime">0:00</span></div>
+  <button id="galleryBtn">&#9638;</button>
+  <button id="shutterBtn" aria-label="record"></button>
+  <div id="hint">PTT: rec &middot; scroll: 16/8mm &middot; hold: gallery</div>
+</div>
+
+<div id="gallery">
+  <h3>Saved clips</h3>
+  <div id="clipList"></div>
+  <div id="galleryEmpty" style="display:none;">No clips yet</div>
+  <div id="galleryHint">scroll: browse &middot; PTT: play &middot; hold: back</div>
+</div>
+
+<div id="player">
+  <video id="playback" controls playsinline></video>
+  <div id="playerHint">PTT: back to camera</div>
+</div>
+
+<script>
+"use strict";
+
+/* ================= constants tuned for this hardware =================
+   Carried over from sibling R1 creations (shaheer-cam / r1-video-creation)
+   built and battle-tested for this same device:
+   - SCREEN_ASPECT + rotation=90: the sensor is mounted rotated; cropping to
+     this aspect after rotating is what makes the frame fill the screen
+     right-side-up instead of sideways/letterboxed.
+   - camera constraints (ideal facing, frameRate ideal 24/max 30, res
+     ideal+min 1280x720): `ideal`-only res was settling for sub-720p and
+     everything came out pixelated; `min` without `max` fixed it without
+     the over-constrained negotiation that `min`+`max` together caused.
+   - mp4/h264 preferred codec, 5Mbps video / 96kbps audio bitrate: proven
+     ceiling before recording visibly lags on this hardware (8Mbps did lag).
+   - recording reads the same canvas already being redrawn for the live
+     view (zero marginal per-frame cost) instead of a second pipeline.
+============================================================================ */
+const SCREEN_ASPECT = 240 / 282;
+const ROTATION = 90;
+
+const PRESETS = {
+  16: {
+    label: '16MM', stock: 'KODAK VISION3 · 24FPS', fps: 24,
+    css: 'contrast(1.06) saturate(1.05) brightness(1.02) hue-rotate(-2deg)',
+    weaveMax: 0.0022, rotMax: 0.0022, flickerRange: 0.02,
+    vignette: { strength: 0.26, color: '6,10,16' },
+    grainAlpha: 0.10, haloAlpha: 0.16, scratchChance: 0.05,
+  },
+  8: {
+    label: '8MM', stock: 'KODACHROME 40 · 18FPS', fps: 18,
+    css: 'contrast(1.18) saturate(0.88) brightness(1.05) sepia(0.14) hue-rotate(-4deg)',
+    weaveMax: 0.0065, rotMax: 0.011, flickerRange: 0.065,
+    vignette: { strength: 0.5, color: '32,20,8' },
+    grainAlpha: 0.22, haloAlpha: 0.26, scratchChance: 0.16,
+  },
+};
+let mode = 16;
+
+/* ---------- elements ---------- */
+const els = {
+  camera: document.getElementById('camera'),
+  gallery: document.getElementById('gallery'),
+  player: document.getElementById('player'),
+  video: document.getElementById('src'),
+  preview: document.getElementById('preview'),
+  modeLabel: document.getElementById('modeLabel'),
+  modeName: document.querySelector('#modeLabel .name'),
+  modeStock: document.querySelector('#modeLabel .stock'),
+  recIndicator: document.getElementById('recIndicator'),
+  recTime: document.getElementById('recTime'),
+  galleryBtn: document.getElementById('galleryBtn'),
+  shutterBtn: document.getElementById('shutterBtn'),
+  err: document.getElementById('err'),
+  clipList: document.getElementById('clipList'),
+  galleryEmpty: document.getElementById('galleryEmpty'),
+  playback: document.getElementById('playback'),
+};
+const previewCtx = els.preview.getContext('2d');
+
+function showError(msg) { els.err.textContent = msg; els.err.style.display = 'block'; }
+
+/* ---------- offscreen rotation canvas ---------- */
+const rotCanvas = document.createElement('canvas');
+const rotCtx = rotCanvas.getContext('2d');
+
+let cropCacheRW = -1, cropCacheRH = -1, cropCacheW = 0, cropCacheH = 0, cropCacheX = 0, cropCacheY = 0;
+
+// Draws the raw camera frame rotated + weave-perturbed into rotCanvas, then
+// crops/scales that into the (already color-graded-on-draw) preview canvas.
+// The weave offset/rotation is folded into this same transform, so gate
+// weave costs nothing extra beyond what rotation already costs.
+function drawFilmFrame(source, sw, sh, weave) {
+  const swapped = ROTATION === 90 || ROTATION === 270;
+  const rw = swapped ? sh : sw;
+  const rh = swapped ? sw : sh;
+
+  if (rotCanvas.width !== rw || rotCanvas.height !== rh) {
+    rotCanvas.width = rw; rotCanvas.height = rh;
+  }
+  rotCtx.save();
+  rotCtx.translate(rw / 2 + weave.x * rw, rh / 2 + weave.y * rh);
+  rotCtx.rotate((ROTATION * Math.PI) / 180 + weave.rot);
+  rotCtx.drawImage(source, -sw / 2, -sh / 2, sw, sh);
+  rotCtx.restore();
+
+  if (rw !== cropCacheRW || rh !== cropCacheRH) {
+    cropCacheRW = rw; cropCacheRH = rh;
+    cropCacheW = rw; cropCacheH = rh;
+    if (rw / rh > SCREEN_ASPECT) cropCacheW = Math.round(rh * SCREEN_ASPECT);
+    else cropCacheH = Math.round(rw / SCREEN_ASPECT);
+    cropCacheX = Math.round((rw - cropCacheW) / 2);
+    cropCacheY = Math.round((rh - cropCacheH) / 2);
+  }
+
+  if (els.preview.width !== cropCacheW || els.preview.height !== cropCacheH) {
+    els.preview.width = cropCacheW; els.preview.height = cropCacheH;
+  }
+
+  const p = PRESETS[mode];
+  const flicker = 1 + weave.flicker;
+  previewCtx.filter = `${p.css} brightness(${flicker})`;
+  previewCtx.drawImage(rotCanvas, cropCacheX, cropCacheY, cropCacheW, cropCacheH, 0, 0, cropCacheW, cropCacheH);
+  previewCtx.filter = 'none';
+}
+
+/* ---------- cheap real-time film artifacts (no per-pixel work in the hot path) ---------- */
+
+// A handful of noise tiles generated ONCE at boot, not regenerated every
+// frame. A prior version of this pipeline (in a sibling creation) rebuilt a
+// full-resolution noise canvas via a per-pixel loop every single frame and
+// that was the main cause of the live view lagging on this hardware —
+// picking between a few pre-baked tiles and letting the GPU scale/composite
+// them gives the same flickering-grain look for near-zero per-frame cost.
+const GRAIN_TILE_W = 160, GRAIN_TILE_H = 188;
+const grainTiles = [];
+(function initGrainTiles() {
+  for (let i = 0; i < 6; i++) {
+    const c = document.createElement('canvas');
+    c.width = GRAIN_TILE_W; c.height = GRAIN_TILE_H;
+    const cctx = c.getContext('2d');
+    const id = cctx.createImageData(GRAIN_TILE_W, GRAIN_TILE_H);
+    for (let p = 0; p < id.data.length; p += 4) {
+      const v = Math.floor(Math.random() * 255);
+      id.data[p] = v; id.data[p + 1] = v; id.data[p + 2] = v; id.data[p + 3] = 255;
+    }
+    cctx.putImageData(id, 0, 0);
+    grainTiles.push(c);
+  }
+})();
+
+function drawGrain(ctx, w, h, tileIdx, alpha) {
+  const tile = grainTiles[tileIdx % grainTiles.length];
+  ctx.save();
+  ctx.globalAlpha = alpha;
+  ctx.globalCompositeOperation = 'overlay';
+  ctx.drawImage(tile, 0, 0, w, h);
+  ctx.restore();
+}
+
+let vigGrad = null, vigW = -1, vigH = -1, vigColorKey = '';
+function drawVignette(ctx, w, h, strength, color) {
+  if (w !== vigW || h !== vigH || color !== vigColorKey) {
+    vigW = w; vigH = h; vigColorKey = color;
+    vigGrad = ctx.createRadialGradient(w / 2, h / 2, Math.min(w, h) * 0.25, w / 2, h / 2, Math.max(w, h) * 0.75);
+    vigGrad.addColorStop(0, `rgba(${color},0)`);
+    vigGrad.addColorStop(1, `rgba(${color},1)`);
+  }
+  ctx.save();
+  ctx.globalCompositeOperation = 'multiply';
+  ctx.globalAlpha = strength;
+  ctx.fillStyle = vigGrad;
+  ctx.fillRect(0, 0, w, h);
+  ctx.restore();
+}
+
+// Halation (warm glow bleeding off highlights) done on a downsampled copy —
+// blur cost scales with pixel count, so blurring at ~1/3 res and scaling the
+// soft result back up keeps this cheap while looking identical (halation is
+// meant to be soft/diffuse anyway). No light leaks anywhere in this pipeline.
+const haloCanvas = document.createElement('canvas');
+const haloCtx = haloCanvas.getContext('2d');
+function drawHalation(ctx, srcCanvas, w, h, alpha) {
+  const dw = Math.max(1, Math.round(w / 3)), dh = Math.max(1, Math.round(h / 3));
+  if (haloCanvas.width !== dw || haloCanvas.height !== dh) { haloCanvas.width = dw; haloCanvas.height = dh; }
+  haloCtx.filter = 'brightness(1.8) contrast(2.6) blur(2px)';
+  haloCtx.drawImage(srcCanvas, 0, 0, dw, dh);
+  haloCtx.filter = 'none';
+  ctx.save();
+  ctx.globalCompositeOperation = 'screen';
+  ctx.globalAlpha = alpha;
+  ctx.drawImage(haloCanvas, 0, 0, w, h);
+  ctx.restore();
+}
+
+// Dust & scratches — sparse dirt/scratch artifacts, NOT light leaks (no
+// directional colored streaks anywhere in this app, by design).
+function drawDustScratches(ctx, w, h, chance) {
+  if (Math.random() > chance) return;
+  ctx.save();
+  ctx.globalCompositeOperation = 'screen';
+  const lines = 1 + Math.floor(Math.random() * 2);
+  for (let i = 0; i < lines; i++) {
+    const x = Math.random() * w;
+    ctx.strokeStyle = `rgba(255,255,255,${0.08 + Math.random() * 0.15})`;
+    ctx.lineWidth = 0.5 + Math.random();
+    ctx.beginPath();
+    ctx.moveTo(x, 0);
+    ctx.lineTo(x + (Math.random() - 0.5) * 8, h);
+    ctx.stroke();
+  }
+  const specks = 2 + Math.floor(Math.random() * 4);
+  for (let i = 0; i < specks; i++) {
+    ctx.fillStyle = `rgba(255,255,255,${0.1 + Math.random() * 0.25})`;
+    ctx.beginPath();
+    ctx.arc(Math.random() * w, Math.random() * h, Math.random() * 1.1, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  ctx.restore();
+}
+
+/* ---------- film clock: holds random per-frame values at the real stock's fps ---------- */
+let lastFilmFrame = 0;
+let held = { x: 0, y: 0, rot: 0, flicker: 0, grainTile: 0 };
+
+function rollFilmFrame() {
+  const p = PRESETS[mode];
+  held.x = (Math.random() * 2 - 1) * p.weaveMax;
+  held.y = (Math.random() * 2 - 1) * p.weaveMax;
+  held.rot = (Math.random() * 2 - 1) * p.rotMax;
+  held.flicker = (Math.random() * 2 - 1) * p.flickerRange;
+  held.grainTile = Math.floor(Math.random() * grainTiles.length);
+}
+
+function renderFilmFrame() {
+  if (els.video.readyState < 2 || !els.video.videoWidth) return;
+  drawFilmFrame(els.video, els.video.videoWidth, els.video.videoHeight, held);
+  const p = PRESETS[mode];
+  const w = els.preview.width, h = els.preview.height;
+  drawGrain(previewCtx, w, h, held.grainTile, p.grainAlpha);
+  drawVignette(previewCtx, w, h, p.vignette.strength, p.vignette.color);
+  drawHalation(previewCtx, els.preview, w, h, p.haloAlpha);
+  drawDustScratches(previewCtx, w, h, p.scratchChance);
+}
+
+let renderLoopStarted = false;
+function renderLoop(ts) {
+  requestAnimationFrame(renderLoop);
+  const interval = 1000 / PRESETS[mode].fps;
+  if (ts - lastFilmFrame >= interval) {
+    lastFilmFrame = ts;
+    rollFilmFrame();
+    renderFilmFrame();
+  }
+}
+
+/* ---------- mode switching (disabled mid-recording: captureStream fps is pinned at record start) ---------- */
+function setMode(m) {
+  if (isRecording) return;
+  mode = m;
+  els.modeName.textContent = PRESETS[m].label;
+  els.modeStock.textContent = PRESETS[m].stock;
+}
+
+/* ---------- camera / mic init (fallback chain proven on this hardware) ---------- */
+let cameraStream = null, micStream = null;
+
+function buildCameraAttempts() {
+  const fr = { ideal: 24, max: 30 };
+  const res = { width: { ideal: 1280, min: 1280 }, height: { ideal: 720, min: 720 } };
+  return [
+    { video: { facingMode: { ideal: 'environment' }, frameRate: fr, ...res } },
+    { video: { frameRate: fr, ...res } },
+    { video: { facingMode: { ideal: 'environment' } } },
+    { video: true },
+  ];
+}
+
+async function initCamera() {
+  let lastErr = null;
+  for (const constraints of buildCameraAttempts()) {
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia(constraints);
+      cameraStream = stream;
+      els.video.srcObject = stream;
+      await els.video.play();
+      els.err.style.display = 'none';
+      if (!renderLoopStarted) { renderLoopStarted = true; requestAnimationFrame(renderLoop); }
+      return;
+    } catch (err) { lastErr = err; }
+  }
+  showError('Camera access failed: ' + (lastErr ? lastErr.message : 'unknown error'));
+}
+
+async function initMic() {
+  try { micStream = await navigator.mediaDevices.getUserMedia({ audio: true }); }
+  catch (err) { micStream = null; console.warn('Mic unavailable, recording without sound:', err); }
+}
+
+/* ---------- recording ---------- */
+let mediaRecorder = null, recordedChunks = [], isRecording = false, recordStartTime = 0, recordTimerInterval = null;
+
+function pickVideoMimeType() {
+  if (!window.MediaRecorder) return '';
+  const candidates = ['video/mp4;codecs=h264', 'video/mp4', 'video/webm;codecs=vp8,opus', 'video/webm;codecs=vp9,opus', 'video/webm'];
+  for (const c of candidates) if (MediaRecorder.isTypeSupported(c)) return c;
+  return '';
+}
+
+function updateRecTimer() {
+  const secs = Math.floor((Date.now() - recordStartTime) / 1000);
+  els.recTime.textContent = `${Math.floor(secs / 60)}:${String(secs % 60).padStart(2, '0')}`;
+}
+
+function startRecording() {
+  if (appView !== 'camera' || isRecording || !els.preview.width) return;
+  if (!window.MediaRecorder) { showError('Video recording is not supported on this device'); return; }
+  const mimeType = pickVideoMimeType();
+  const fps = PRESETS[mode].fps;
+  const stream = els.preview.captureStream(fps);
+  const audioTrack = micStream && micStream.getAudioTracks()[0];
+  if (audioTrack) stream.addTrack(audioTrack);
+  recordedChunks = [];
+  try {
+    mediaRecorder = new MediaRecorder(stream, {
+      ...(mimeType ? { mimeType } : {}),
+      videoBitsPerSecond: 5000000,
+      audioBitsPerSecond: 96000,
+    });
+  } catch (e) { showError('Could not start recording: ' + e.message); return; }
+  mediaRecorder.ondataavailable = (e) => { if (e.data && e.data.size) recordedChunks.push(e.data); };
+  mediaRecorder.onstop = onRecordingStopped;
+  mediaRecorder.start();
+  isRecording = true;
+  recordStartTime = Date.now();
+  els.recIndicator.classList.add('on');
+  els.shutterBtn.classList.add('recording');
+  updateRecTimer();
+  recordTimerInterval = setInterval(updateRecTimer, 500);
+}
+
+function stopRecording() {
+  if (!isRecording) return;
+  isRecording = false;
+  clearInterval(recordTimerInterval);
+  els.recIndicator.classList.remove('on');
+  els.shutterBtn.classList.remove('recording');
+  if (mediaRecorder && mediaRecorder.state !== 'inactive') mediaRecorder.stop();
+}
+
+function toggleRecording() { isRecording ? stopRecording() : startRecording(); }
+
+async function onRecordingStopped() {
+  if (!recordedChunks.length) return;
+  const mimeStr = mediaRecorder.mimeType || 'video/webm';
+  const blob = new Blob(recordedChunks, { type: mimeStr });
+  await saveClip(blob, mode);
+}
+
+/* ---------- IndexedDB clip storage (video blobs are too big for creationStorage) ---------- */
+let db;
+const DB_NAME = 'r1filmlook', STORE = 'clips';
+function openDB() {
+  return new Promise((resolve, reject) => {
+    const req = indexedDB.open(DB_NAME, 1);
+    req.onupgradeneeded = () => req.result.createObjectStore(STORE, { keyPath: 'id' });
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error);
+  });
+}
+let clips = [], selIndex = 0;
+async function saveClip(blob, clipMode) {
+  const clip = { id: Date.now(), ts: new Date().toLocaleString(), mode: PRESETS[clipMode].label, blob };
+  await new Promise((res, rej) => {
+    const tx = db.transaction(STORE, 'readwrite');
+    tx.objectStore(STORE).put(clip);
+    tx.oncomplete = res; tx.onerror = () => rej(tx.error);
+  });
+  clips.unshift(clip);
+  renderGallery();
+}
+async function loadClips() {
+  clips = await new Promise((res, rej) => {
+    const tx = db.transaction(STORE, 'readonly');
+    const req = tx.objectStore(STORE).getAll();
+    req.onsuccess = () => res(req.result.sort((a, b) => b.id - a.id));
+    req.onerror = () => rej(req.error);
+  });
+  renderGallery();
+}
+
+function renderGallery() {
+  els.clipList.innerHTML = '';
+  els.galleryEmpty.style.display = clips.length ? 'none' : 'block';
+  clips.forEach((c, i) => {
+    const div = document.createElement('div');
+    div.className = 'clip' + (i === selIndex ? ' sel' : '');
+    div.innerHTML = `<span>${c.ts}</span><span class="badge">${c.mode}</span>`;
+    els.clipList.appendChild(div);
+  });
+}
+
+function playSelected() {
+  const c = clips[selIndex];
+  if (!c) return;
+  els.playback.src = URL.createObjectURL(c.blob);
+  setView('player');
+  els.playback.play();
+}
+
+/* ---------- view switching ---------- */
+let appView = 'camera'; // camera | gallery | player
+function setView(v) {
+  appView = v;
+  els.camera.classList.toggle('active', v === 'camera');
+  els.gallery.classList.toggle('active', v === 'gallery');
+  els.player.classList.toggle('active', v === 'player');
+  if (v === 'gallery') renderGallery();
+  if (v !== 'player') { els.playback.pause(); }
+}
+
+/* ---------- touch/click controls (also usable in a desktop browser) ---------- */
+els.shutterBtn.addEventListener('click', () => {
+  if (appView === 'camera') toggleRecording();
+  else if (appView === 'gallery') playSelected();
+  else if (appView === 'player') setView('camera');
+});
+els.galleryBtn.addEventListener('click', () => setView(appView === 'camera' ? 'gallery' : 'camera'));
+els.modeLabel.addEventListener('click', () => setMode(mode === 16 ? 8 : 16));
+
+/* ---------- R1 hardware hooks ---------- */
+// PTT short press: sideClick. Long press: longPressStart. Scroll wheel: scrollUp/scrollDown.
+window.addEventListener('sideClick', () => {
+  if (appView === 'camera') toggleRecording();
+  else if (appView === 'gallery') playSelected();
+  else if (appView === 'player') setView('camera');
+});
+window.addEventListener('longPressStart', () => {
+  if (appView === 'gallery' || appView === 'player') setView('camera');
+  else if (appView === 'camera') setView('gallery');
+});
+window.addEventListener('scrollUp', () => {
+  if (appView === 'camera') setMode(8);
+  else if (appView === 'gallery' && clips.length) { selIndex = Math.max(0, selIndex - 1); renderGallery(); }
+});
+window.addEventListener('scrollDown', () => {
+  if (appView === 'camera') setMode(16);
+  else if (appView === 'gallery' && clips.length) { selIndex = Math.min(clips.length - 1, selIndex + 1); renderGallery(); }
+});
+
+/* ---------- keyboard fallback for desktop testing ---------- */
+document.addEventListener('keydown', (e) => {
+  if (e.code === 'Space') { if (!e.repeat) { e.preventDefault(); toggleRecording(); } }
+  else if (e.code === 'ArrowLeft') { if (appView === 'gallery') { selIndex = Math.max(0, selIndex - 1); renderGallery(); } else setMode(16); }
+  else if (e.code === 'ArrowRight') { if (appView === 'gallery') { selIndex = Math.min(clips.length - 1, selIndex + 1); renderGallery(); } else setMode(8); }
+  else if (e.key === 'g') setView(appView === 'camera' ? 'gallery' : 'camera');
+  else if (e.key === 'Enter') { if (appView === 'gallery') playSelected(); }
+  else if (e.key === 'Escape') { if (appView !== 'camera') setView('camera'); }
+});
+
+/* ---------- boot ---------- */
+(async function boot() {
+  setMode(16);
+  try { db = await openDB(); await loadClips(); } catch (e) { showError('Storage init failed: ' + e.message); }
+  await initCamera();
+  await initMic();
+})();
+</script>
+</body>
+</html>
