@@ -36,10 +36,6 @@
 
   #hint{position:absolute;bottom:3px;left:0;right:0;text-align:center;font-size:9px;opacity:.6;}
 
-  #shutterBtn{position:absolute;bottom:16px;left:50%;transform:translateX(-50%);
-    width:44px;height:44px;border-radius:50%;background:#fff;border:3px solid rgba(255,255,255,.35);}
-  #shutterBtn.recording{background:#e03b3b;}
-
   #err{position:absolute;top:0;left:0;right:0;padding:8px;background:#500;font-size:10px;
     display:none;z-index:10;}
 
@@ -70,7 +66,6 @@
   <div id="recIndicator"><div id="recDot"></div><span id="recTime">0:00</span></div>
   <button id="rotateBtn" title="rotate feed 90°">&#8635;</button>
   <button id="galleryBtn">&#9638;</button>
-  <button id="shutterBtn" aria-label="record"></button>
   <div id="hint">PTT: rec &middot; scroll: front/back cam &middot; hold: gallery</div>
 </div>
 
@@ -137,7 +132,10 @@ const PRESETS = {
   8: {
     label: '8MM', stock: 'KODACHROME 40 · 18FPS', fps: 18,
     css: 'contrast(1.18) saturate(0.88) brightness(1.05) sepia(0.14) hue-rotate(-4deg)',
-    weaveMax: 0.0065, rotMax: 0.011, flickerRange: 0.065,
+    // Gate weave (frame-shake) removed on request — it read as distracting
+    // jitter rather than the intended subtle wobble. Frame rate (18fps) and
+    // flicker are untouched.
+    weaveMax: 0, rotMax: 0, flickerRange: 0.065,
     vignette: { strength: 0.5, color: '32,20,8' },
     grainAlpha: 0.22, haloAlpha: 0.26, scratchChance: 0.16,
   },
@@ -158,7 +156,6 @@ const els = {
   recTime: document.getElementById('recTime'),
   galleryBtn: document.getElementById('galleryBtn'),
   rotateBtn: document.getElementById('rotateBtn'),
-  shutterBtn: document.getElementById('shutterBtn'),
   err: document.getElementById('err'),
   clipList: document.getElementById('clipList'),
   galleryEmpty: document.getElementById('galleryEmpty'),
@@ -428,7 +425,6 @@ function startRecording() {
   isRecording = true;
   recordStartTime = Date.now();
   els.recIndicator.classList.add('on');
-  els.shutterBtn.classList.add('recording');
   updateRecTimer();
   recordTimerInterval = setInterval(updateRecTimer, 500);
 }
@@ -438,7 +434,6 @@ function stopRecording() {
   isRecording = false;
   clearInterval(recordTimerInterval);
   els.recIndicator.classList.remove('on');
-  els.shutterBtn.classList.remove('recording');
   if (mediaRecorder && mediaRecorder.state !== 'inactive') mediaRecorder.stop();
 }
 
@@ -514,11 +509,6 @@ function setView(v) {
 }
 
 /* ---------- touch/click controls (also usable in a desktop browser) ---------- */
-els.shutterBtn.addEventListener('click', () => {
-  if (appView === 'camera') toggleRecording();
-  else if (appView === 'gallery') playSelected();
-  else if (appView === 'player') setView('camera');
-});
 els.galleryBtn.addEventListener('click', () => setView(appView === 'camera' ? 'gallery' : 'camera'));
 els.modeLabel.addEventListener('click', () => setMode(mode === 16 ? 8 : 16));
 els.rotateBtn.addEventListener('click', () => setRotation(rotation + 90));
