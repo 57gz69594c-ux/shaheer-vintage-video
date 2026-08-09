@@ -61,6 +61,12 @@
   #share h3{margin:6px 0 10px;font-size:12px;}
   #shareStatus{font-size:11px;opacity:.85;}
   #shareError{font-size:10px;color:#ff6b6b;padding:0 6px;}
+  #shareErrorMsg{margin-bottom:10px;}
+  #shareErrorActions{display:flex;gap:8px;justify-content:center;}
+  #shareErrorActions button{font-size:10px;font-weight:600;padding:6px 12px;border-radius:999px;
+    border:1px solid rgba(255,255,255,.25);background:rgba(255,255,255,.08);color:#eee;}
+  #shareRetryBtn{border-color:rgba(226,192,132,.5) !important;background:rgba(226,192,132,.15) !important;
+    color:#e2c084 !important;}
   #shareQrWrap{display:flex;flex-direction:column;align-items:center;gap:6px;}
   #shareImg{border-radius:8px;background:#fff;padding:6px;display:block;}
   #shareUrl{font-size:8px;opacity:.4;word-break:break-all;max-width:200px;}
@@ -104,7 +110,13 @@
 <div id="share">
   <h3>Share clip</h3>
   <div id="shareStatus">Uploading&hellip; 0%</div>
-  <div id="shareError" style="display:none;"></div>
+  <div id="shareError" style="display:none;">
+    <div id="shareErrorMsg"></div>
+    <div id="shareErrorActions">
+      <button id="shareRetryBtn">Retry</button>
+      <button id="shareBackBtn">Back</button>
+    </div>
+  </div>
   <div id="shareQrWrap" style="display:none;">
     <img id="shareImg" width="170" height="170" alt="Download QR code">
     <div id="shareUrl"></div>
@@ -212,6 +224,9 @@ const els = {
   share: document.getElementById('share'),
   shareStatus: document.getElementById('shareStatus'),
   shareError: document.getElementById('shareError'),
+  shareErrorMsg: document.getElementById('shareErrorMsg'),
+  shareRetryBtn: document.getElementById('shareRetryBtn'),
+  shareBackBtn: document.getElementById('shareBackBtn'),
   shareQrWrap: document.getElementById('shareQrWrap'),
   shareImg: document.getElementById('shareImg'),
   shareUrl: document.getElementById('shareUrl'),
@@ -584,20 +599,37 @@ function uploadWithProgress(form, onProgress) {
   return new Promise((resolve, reject) => {
     const xhr = new XMLHttpRequest();
     xhr.open('POST', 'https://litterbox.catbox.moe/resources/internals/api.php');
+    xhr.timeout = 60000;
     xhr.upload.onprogress = (e) => {
       if (e.lengthComputable) onProgress(Math.round((e.loaded / e.total) * 100));
     };
     xhr.onload = () => {
       const text = (xhr.responseText || '').trim();
-      if (xhr.status >= 200 && xhr.status < 300 && text.indexOf('http') === 0) resolve(text);
-      else reject(new Error('server error (' + xhr.status + ')'));
+      if (xhr.status >= 200 && xhr.status < 300 && text.indexOf('http') === 0) {
+        resolve(text);
+      } else {
+        // Surface exactly what the server sent back (litterbox returns plain-
+        // text error reasons like file-too-large or bad reqtype) instead of a
+        // generic message, so a real failure reason is visible on-device.
+        reject(new Error(`server rejected upload — HTTP ${xhr.status}${text ? ': ' + text.slice(0, 100) : ' (empty response)'}`));
+      }
     };
-    xhr.onerror = () => reject(new Error('network error'));
+    xhr.onerror = () => {
+      // A generic XHR error with no HTTP status at all (status stays 0) means
+      // the request never got a response — could be no connectivity, a DNS
+      // failure, or the R1's app sandbox blocking the cross-origin request
+      // outright (different from a server-side rejection above).
+      reject(new Error(`request never reached the server (status ${xhr.status})${navigator.onLine === false ? ' — device reports offline' : ' — possibly blocked by network/app sandbox, or connection dropped'}`));
+    };
+    xhr.ontimeout = () => reject(new Error('upload timed out after 60s — connection may be too slow for this clip\'s size'));
     xhr.send(form);
   });
 }
 
+let lastShareClip = null;
+
 async function shareClip(clip) {
+  lastShareClip = clip;
   setView('share');
   els.shareStatus.style.display = 'block';
   els.shareStatus.textContent = 'Uploading… 0%';
@@ -621,10 +653,13 @@ async function shareClip(clip) {
     els.shareQrWrap.style.display = 'flex';
   } catch (e) {
     els.shareStatus.style.display = 'none';
+    els.shareErrorMsg.textContent = e.message;
     els.shareError.style.display = 'block';
-    els.shareError.textContent = 'Upload failed: ' + e.message + ' — try again?';
   }
 }
+
+els.shareRetryBtn.addEventListener('click', () => { if (lastShareClip) shareClip(lastShareClip); });
+els.shareBackBtn.addEventListener('click', () => setView('gallery'));
 
 function playSelected() {
   const c = clips[selIndex];
