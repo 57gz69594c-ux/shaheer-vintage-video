@@ -156,20 +156,31 @@ function isSelfieMode() { return cachedFacing === 'user'; }
 const PRESETS = {
   16: {
     label: '16MM', stock: 'KODAK VISION3 · 24FPS', fps: 24,
-    css: 'contrast(1.06) saturate(1.05) brightness(1.02) hue-rotate(-2deg)',
+    // Vision3: warm, robust color with only *moderate* saturation and a
+    // gentle highlight rolloff — contrast/brightness left untouched from
+    // baseline on purpose (real film gets its look from color response, not
+    // a punchier curve). tint is screen-blended, which can only ever
+    // lighten/warm a pixel, never darken one.
+    css: 'contrast(1.04) saturate(1.32) brightness(1.03) hue-rotate(-3deg)',
+    tint: 'rgba(255,176,90,0.07)',
     weaveMax: 0.0022, rotMax: 0.0022, flickerRange: 0.02,
     vignette: { strength: 0.26, color: '6,10,16' },
-    grainAlpha: 0.10, haloAlpha: 0.16, scratchChance: 0.05,
+    grainAlpha: 0.30, haloAlpha: 0.16,
   },
   8: {
     label: '8MM', stock: 'KODACHROME 40 · 18FPS', fps: 18,
-    css: 'contrast(1.18) saturate(0.88) brightness(1.05) sepia(0.14) hue-rotate(-4deg)',
+    // Kodachrome's whole signature is vivid, punchy reds/golds — sepia()
+    // was fighting that by desaturating toward brown, so it's gone; the
+    // vividness now comes from saturation + a warm screen tint instead of
+    // contrast, same reasoning as 16mm above.
+    css: 'contrast(1.08) saturate(1.7) brightness(1.06) hue-rotate(-6deg)',
+    tint: 'rgba(255,140,40,0.1)',
     // Gate weave (frame-shake) removed on request — it read as distracting
     // jitter rather than the intended subtle wobble. Frame rate (18fps) and
     // flicker are untouched.
     weaveMax: 0, rotMax: 0, flickerRange: 0.065,
     vignette: { strength: 0.5, color: '32,20,8' },
-    grainAlpha: 0.22, haloAlpha: 0.26, scratchChance: 0.16,
+    grainAlpha: 0.44, haloAlpha: 0.26,
   },
 };
 let mode = 16;
@@ -264,7 +275,11 @@ function drawFilmFrame(source, sw, sh, weave) {
 // that was the main cause of the live view lagging on this hardware —
 // picking between a few pre-baked tiles and letting the GPU scale/composite
 // them gives the same flickering-grain look for near-zero per-frame cost.
-const GRAIN_TILE_W = 160, GRAIN_TILE_H = 188;
+// Sized well above screen resolution so grain reads as fine texture instead
+// of blotchy upscaled noise when stretched over the preview canvas — this is
+// still a one-time cost at boot, not a per-frame one, so raising it doesn't
+// affect live performance at all.
+const GRAIN_TILE_W = 480, GRAIN_TILE_H = 564;
 const grainTiles = [];
 (function initGrainTiles() {
   for (let i = 0; i < 6; i++) {
@@ -285,7 +300,12 @@ function drawGrain(ctx, w, h, tileIdx, alpha) {
   const tile = grainTiles[tileIdx % grainTiles.length];
   ctx.save();
   ctx.globalAlpha = alpha;
-  ctx.globalCompositeOperation = 'overlay';
+  // 'soft-light' instead of 'overlay' — overlay is a hard multiply/screen
+  // split that visibly punches contrast (crushes toward black/white) at
+  // any alpha worth seeing. Soft-light perturbs tone gently around neutral
+  // gray instead, so grain can be pushed much more visible (see the higher
+  // grainAlpha values in PRESETS) without darkening or contrast-ing the image.
+  ctx.globalCompositeOperation = 'soft-light';
   ctx.drawImage(tile, 0, 0, w, h);
   ctx.restore();
 }
@@ -325,29 +345,15 @@ function drawHalation(ctx, srcCanvas, w, h, alpha) {
   ctx.restore();
 }
 
-// Dust & scratches — sparse dirt/scratch artifacts, NOT light leaks (no
-// directional colored streaks anywhere in this app, by design).
-function drawDustScratches(ctx, w, h, chance) {
-  if (Math.random() > chance) return;
+// Color cast tint — 'screen' blend is mathematically incapable of ever
+// darkening a pixel (screen(a,b) >= a always), so this can only add warmth/
+// color, never the darkness or added contrast that was explicitly not
+// wanted here.
+function drawTint(ctx, w, h, rgba) {
   ctx.save();
   ctx.globalCompositeOperation = 'screen';
-  const lines = 1 + Math.floor(Math.random() * 2);
-  for (let i = 0; i < lines; i++) {
-    const x = Math.random() * w;
-    ctx.strokeStyle = `rgba(255,255,255,${0.08 + Math.random() * 0.15})`;
-    ctx.lineWidth = 0.5 + Math.random();
-    ctx.beginPath();
-    ctx.moveTo(x, 0);
-    ctx.lineTo(x + (Math.random() - 0.5) * 8, h);
-    ctx.stroke();
-  }
-  const specks = 2 + Math.floor(Math.random() * 4);
-  for (let i = 0; i < specks; i++) {
-    ctx.fillStyle = `rgba(255,255,255,${0.1 + Math.random() * 0.25})`;
-    ctx.beginPath();
-    ctx.arc(Math.random() * w, Math.random() * h, Math.random() * 1.1, 0, Math.PI * 2);
-    ctx.fill();
-  }
+  ctx.fillStyle = rgba;
+  ctx.fillRect(0, 0, w, h);
   ctx.restore();
 }
 
@@ -369,10 +375,10 @@ function renderFilmFrame() {
   drawFilmFrame(els.video, els.video.videoWidth, els.video.videoHeight, held);
   const p = PRESETS[mode];
   const w = els.preview.width, h = els.preview.height;
+  drawTint(previewCtx, w, h, p.tint);
   drawGrain(previewCtx, w, h, held.grainTile, p.grainAlpha);
   drawVignette(previewCtx, w, h, p.vignette.strength, p.vignette.color);
   drawHalation(previewCtx, els.preview, w, h, p.haloAlpha);
-  drawDustScratches(previewCtx, w, h, p.scratchChance);
 }
 
 let renderLoopStarted = false;
