@@ -661,22 +661,24 @@ async function shareClip(clip) {
     els.shareQrWrap.style.display = 'flex';
   } catch (e) {
     els.shareStatus.style.display = 'none';
-    els.shareErrorMsg.textContent = e.message;
+    const sizeMb = (clip.blob.size / 1024 / 1024).toFixed(1);
+    els.shareErrorMsg.textContent = `${e.message} (clip size: ${sizeMb} MB)`;
     els.shareError.style.display = 'block';
     runConnectivityProbe();
   }
 }
 
-// Runs automatically on every share failure — tests reachability of three
-// different domains so a single failed attempt tells us WHICH kind of
-// problem this is: if even the same-origin check fails, something's wrong
-// with connectivity generally; if same-origin and api.github.com succeed
-// but litterbox fails, that specific host/domain is being blocked or
-// rejected while general outbound network access works fine.
+// Runs automatically on every share failure. First does plain GET reachability
+// checks against three domains (rules domain-blocking in/out), then — since a
+// GET succeeding doesn't prove a large POST upload will — actually performs a
+// real tiny upload (a few bytes) to litterbox using the exact same code path
+// as the real share. If the tiny upload succeeds where the full-size clip
+// failed, that isolates the problem to payload size specifically, rather
+// than the endpoint/method/CORS setup being broken.
 const PROBE_TARGETS = [
   { name: 'this app (same-origin)', url: location.origin + location.pathname },
   { name: 'api.github.com', url: 'https://api.github.com/zen' },
-  { name: 'litterbox.catbox.moe', url: 'https://litterbox.catbox.moe/' },
+  { name: 'litterbox.catbox.moe (GET)', url: 'https://litterbox.catbox.moe/' },
 ];
 
 function probeOne(url, timeoutMs) {
@@ -691,15 +693,32 @@ function probeOne(url, timeoutMs) {
   });
 }
 
+async function probeTinyUpload() {
+  const form = new FormData();
+  form.append('reqtype', 'fileupload');
+  form.append('time', '1h');
+  form.append('fileToUpload', new Blob(['r1-connectivity-probe'], { type: 'text/plain' }), 'probe.txt');
+  try {
+    await uploadWithProgress(form, () => {});
+    return { ok: true, detail: 'tiny upload succeeded' };
+  } catch (e) {
+    return { ok: false, detail: e.message };
+  }
+}
+
 async function runConnectivityProbe() {
-  els.shareDiag.innerHTML = PROBE_TARGETS
-    .map((t) => `<div><span>${t.name}</span><span class="pending">testing…</span></div>`)
+  const rowNames = PROBE_TARGETS.map((t) => t.name).concat('litterbox.catbox.moe (tiny POST upload)');
+  els.shareDiag.innerHTML = rowNames
+    .map((name) => `<div><span>${name}</span><span class="pending">testing…</span></div>`)
     .join('');
   const rows = els.shareDiag.children;
   for (let i = 0; i < PROBE_TARGETS.length; i++) {
     const result = await probeOne(PROBE_TARGETS[i].url, 8000);
     rows[i].innerHTML = `<span>${PROBE_TARGETS[i].name}</span><span class="${result.ok ? 'ok' : 'fail'}">${result.ok ? 'reachable' : result.detail}</span>`;
   }
+  const last = rows.length - 1;
+  const uploadResult = await probeTinyUpload();
+  rows[last].innerHTML = `<span>${rowNames[last]}</span><span class="${uploadResult.ok ? 'ok' : 'fail'}">${uploadResult.detail}</span>`;
 }
 
 els.shareRetryBtn.addEventListener('click', () => { if (lastShareClip) shareClip(lastShareClip); });
