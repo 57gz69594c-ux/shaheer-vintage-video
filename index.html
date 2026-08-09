@@ -29,6 +29,10 @@
     background:rgba(20,20,20,.75);border:1px solid rgba(255,255,255,.2);color:#eee;
     font-size:12px;display:flex;align-items:center;justify-content:center;}
 
+  #rotateBtn{position:absolute;top:6px;left:6px;width:24px;height:24px;border-radius:50%;
+    background:rgba(20,20,20,.75);border:1px solid rgba(255,255,255,.2);color:#eee;
+    font-size:13px;display:flex;align-items:center;justify-content:center;}
+
   #hint{position:absolute;bottom:3px;left:0;right:0;text-align:center;font-size:9px;opacity:.6;}
 
   #shutterBtn{position:absolute;bottom:16px;left:50%;transform:translateX(-50%);
@@ -63,6 +67,7 @@
   <canvas id="preview"></canvas>
   <div id="modeLabel"><span class="name">16MM</span><span class="stock">KODAK VISION3 &middot; 24FPS</span></div>
   <div id="recIndicator"><div id="recDot"></div><span id="recTime">0:00</span></div>
+  <button id="rotateBtn" title="rotate feed 90°">&#8635;</button>
   <button id="galleryBtn">&#9638;</button>
   <button id="shutterBtn" aria-label="record"></button>
   <div id="hint">PTT: rec &middot; scroll: 16/8mm &middot; hold: gallery</div>
@@ -99,7 +104,14 @@
      view (zero marginal per-frame cost) instead of a second pipeline.
 ============================================================================ */
 const SCREEN_ASPECT = 240 / 282;
-const ROTATION = 90;
+// Default is 270° (90° counterclockwise from the old 90° default) — the
+// sensor was coming in rotated the wrong way at 90°. Persisted + adjustable
+// via the on-screen rotate button since camera mounting can vary by unit.
+let rotation = parseInt(localStorage.getItem('r1-film-rotation') || '270', 10);
+function setRotation(deg) {
+  rotation = ((deg % 360) + 360) % 360;
+  localStorage.setItem('r1-film-rotation', String(rotation));
+}
 
 const PRESETS = {
   16: {
@@ -132,6 +144,7 @@ const els = {
   recIndicator: document.getElementById('recIndicator'),
   recTime: document.getElementById('recTime'),
   galleryBtn: document.getElementById('galleryBtn'),
+  rotateBtn: document.getElementById('rotateBtn'),
   shutterBtn: document.getElementById('shutterBtn'),
   err: document.getElementById('err'),
   clipList: document.getElementById('clipList'),
@@ -153,7 +166,7 @@ let cropCacheRW = -1, cropCacheRH = -1, cropCacheW = 0, cropCacheH = 0, cropCach
 // The weave offset/rotation is folded into this same transform, so gate
 // weave costs nothing extra beyond what rotation already costs.
 function drawFilmFrame(source, sw, sh, weave) {
-  const swapped = ROTATION === 90 || ROTATION === 270;
+  const swapped = rotation === 90 || rotation === 270;
   const rw = swapped ? sh : sw;
   const rh = swapped ? sw : sh;
 
@@ -162,7 +175,7 @@ function drawFilmFrame(source, sw, sh, weave) {
   }
   rotCtx.save();
   rotCtx.translate(rw / 2 + weave.x * rw, rh / 2 + weave.y * rh);
-  rotCtx.rotate((ROTATION * Math.PI) / 180 + weave.rot);
+  rotCtx.rotate((rotation * Math.PI) / 180 + weave.rot);
   rotCtx.drawImage(source, -sw / 2, -sh / 2, sw, sh);
   rotCtx.restore();
 
@@ -489,6 +502,7 @@ els.shutterBtn.addEventListener('click', () => {
 });
 els.galleryBtn.addEventListener('click', () => setView(appView === 'camera' ? 'gallery' : 'camera'));
 els.modeLabel.addEventListener('click', () => setMode(mode === 16 ? 8 : 16));
+els.rotateBtn.addEventListener('click', () => setRotation(rotation + 90));
 
 /* ---------- R1 hardware hooks ---------- */
 // PTT short press: sideClick. Long press: longPressStart. Scroll wheel: scrollUp/scrollDown.
