@@ -61,7 +61,13 @@
   #share h3{margin:6px 0 10px;font-size:12px;}
   #shareStatus{font-size:11px;opacity:.85;}
   #shareError{font-size:10px;color:#ff6b6b;padding:0 6px;}
-  #shareErrorMsg{margin-bottom:10px;}
+  #shareErrorMsg{margin-bottom:8px;}
+  #shareDiag{font-size:9px;opacity:.75;text-align:left;margin-bottom:10px;
+    background:rgba(255,255,255,.05);border-radius:6px;padding:6px 8px;line-height:1.6;}
+  #shareDiag div{display:flex;justify-content:space-between;gap:8px;}
+  #shareDiag .ok{color:#7ee08a;}
+  #shareDiag .fail{color:#ff6b6b;}
+  #shareDiag .pending{opacity:.5;}
   #shareErrorActions{display:flex;gap:8px;justify-content:center;}
   #shareErrorActions button{font-size:10px;font-weight:600;padding:6px 12px;border-radius:999px;
     border:1px solid rgba(255,255,255,.25);background:rgba(255,255,255,.08);color:#eee;}
@@ -112,6 +118,7 @@
   <div id="shareStatus">Uploading&hellip; 0%</div>
   <div id="shareError" style="display:none;">
     <div id="shareErrorMsg"></div>
+    <div id="shareDiag"></div>
     <div id="shareErrorActions">
       <button id="shareRetryBtn">Retry</button>
       <button id="shareBackBtn">Back</button>
@@ -225,6 +232,7 @@ const els = {
   shareStatus: document.getElementById('shareStatus'),
   shareError: document.getElementById('shareError'),
   shareErrorMsg: document.getElementById('shareErrorMsg'),
+  shareDiag: document.getElementById('shareDiag'),
   shareRetryBtn: document.getElementById('shareRetryBtn'),
   shareBackBtn: document.getElementById('shareBackBtn'),
   shareQrWrap: document.getElementById('shareQrWrap'),
@@ -655,6 +663,42 @@ async function shareClip(clip) {
     els.shareStatus.style.display = 'none';
     els.shareErrorMsg.textContent = e.message;
     els.shareError.style.display = 'block';
+    runConnectivityProbe();
+  }
+}
+
+// Runs automatically on every share failure — tests reachability of three
+// different domains so a single failed attempt tells us WHICH kind of
+// problem this is: if even the same-origin check fails, something's wrong
+// with connectivity generally; if same-origin and api.github.com succeed
+// but litterbox fails, that specific host/domain is being blocked or
+// rejected while general outbound network access works fine.
+const PROBE_TARGETS = [
+  { name: 'this app (same-origin)', url: location.origin + location.pathname },
+  { name: 'api.github.com', url: 'https://api.github.com/zen' },
+  { name: 'litterbox.catbox.moe', url: 'https://litterbox.catbox.moe/' },
+];
+
+function probeOne(url, timeoutMs) {
+  return new Promise((resolve) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open('GET', url + (url.indexOf('?') === -1 ? '?' : '&') + 'probe=' + Date.now());
+    xhr.timeout = timeoutMs;
+    xhr.onload = () => resolve({ ok: true, detail: 'HTTP ' + xhr.status });
+    xhr.onerror = () => resolve({ ok: false, detail: 'blocked/unreachable (status ' + xhr.status + ')' });
+    xhr.ontimeout = () => resolve({ ok: false, detail: 'timed out after ' + (timeoutMs / 1000) + 's' });
+    xhr.send();
+  });
+}
+
+async function runConnectivityProbe() {
+  els.shareDiag.innerHTML = PROBE_TARGETS
+    .map((t) => `<div><span>${t.name}</span><span class="pending">testing…</span></div>`)
+    .join('');
+  const rows = els.shareDiag.children;
+  for (let i = 0; i < PROBE_TARGETS.length; i++) {
+    const result = await probeOne(PROBE_TARGETS[i].url, 8000);
+    rows[i].innerHTML = `<span>${PROBE_TARGETS[i].name}</span><span class="${result.ok ? 'ok' : 'fail'}">${result.ok ? 'reachable' : result.detail}</span>`;
   }
 }
 
