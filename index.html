@@ -621,6 +621,10 @@ async function transcodeToMp4(webmBlob, onProgress) {
   ffmpeg.on('progress', ({ progress }) => onProgress(Math.max(0, Math.min(99, Math.round(progress * 100)))));
   const baseURL = 'https://cdn.jsdelivr.net/npm/@ffmpeg/core@0.12.6/dist/esm';
   await ffmpeg.load({
+    // Browsers refuse to construct a Worker from a cross-origin script URL
+    // directly; blob-ifying it first (same trick as coreURL/wasmURL below)
+    // makes it same-origin from the browser's point of view.
+    classWorkerURL: await toBlobURL('https://cdn.jsdelivr.net/npm/@ffmpeg/ffmpeg@0.12.10/dist/esm/worker.js', 'text/javascript'),
     coreURL: await toBlobURL(`${baseURL}/ffmpeg-core.js`, 'text/javascript'),
     wasmURL: await toBlobURL(`${baseURL}/ffmpeg-core.wasm`, 'application/wasm'),
   });
