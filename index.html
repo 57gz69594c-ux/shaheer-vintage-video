@@ -607,43 +607,6 @@ async function deleteClip(id) {
   renderGallery();
 }
 
-// The R1's webview has no MP4/H.264 MediaRecorder encoder — pickVideoMimeType
-// above already prefers mp4 candidates first, and recording still lands on
-// webm/VP8 in practice, confirming the platform simply lacks the encoder.
-// iOS can't decode VP8/VP9 or parse webm containers at all, so a clip shared
-// to an iPhone needs to actually be re-encoded, not just relabeled. Done
-// client-side at share time via ffmpeg.wasm (loaded from CDN on demand, not
-// bundled, since this is a single static HTML file).
-async function transcodeToMp4(webmBlob, onProgress) {
-  const { FFmpeg } = await import('https://cdn.jsdelivr.net/npm/@ffmpeg/ffmpeg@0.12.10/dist/esm/index.js');
-  const { fetchFile, toBlobURL } = await import('https://cdn.jsdelivr.net/npm/@ffmpeg/util@0.12.1/dist/esm/index.js');
-  const ffmpeg = new FFmpeg();
-  ffmpeg.on('progress', ({ progress }) => onProgress(Math.max(0, Math.min(99, Math.round(progress * 100)))));
-  const baseURL = 'https://cdn.jsdelivr.net/npm/@ffmpeg/core@0.12.6/dist/esm';
-  const workerBase = 'https://cdn.jsdelivr.net/npm/@ffmpeg/ffmpeg@0.12.10/dist/esm';
-  // Browsers refuse to construct a module Worker from a cross-origin script
-  // URL directly, so ffmpeg.wasm's worker.js has to be wrapped in a same-
-  // origin blob: URL — but worker.js itself does `import ... from "./const.js"`,
-  // a relative specifier that can't resolve against a path-less blob: URL,
-  // and ffmpeg.wasm never wires up worker.onerror, so that failure doesn't
-  // reject anything — load() just hangs forever with no error and no log.
-  // Rewriting the relative imports to absolute URLs before blob-ifying fixes
-  // it (verified: without this, transcode hung indefinitely with zero output).
-  let workerSrc = await (await fetch(`${workerBase}/worker.js`)).text();
-  workerSrc = workerSrc.replace('"./const.js"', `"${workerBase}/const.js"`).replace('"./errors.js"', `"${workerBase}/errors.js"`);
-  const classWorkerURL = URL.createObjectURL(new Blob([workerSrc], { type: 'text/javascript' }));
-  await ffmpeg.load({
-    classWorkerURL,
-    coreURL: await toBlobURL(`${baseURL}/ffmpeg-core.js`, 'text/javascript'),
-    wasmURL: await toBlobURL(`${baseURL}/ffmpeg-core.wasm`, 'application/wasm'),
-  });
-  await ffmpeg.writeFile('input.webm', await fetchFile(webmBlob));
-  await ffmpeg.exec(['-i', 'input.webm', '-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '28', '-pix_fmt', 'yuv420p', '-c:a', 'aac', 'output.mp4']);
-  const data = await ffmpeg.readFile('output.mp4');
-  await ffmpeg.terminate();
-  return new Blob([data.buffer], { type: 'video/mp4' });
-}
-
 /* ---------- share via QR (upload to an anonymous, auto-expiring temp host) ----------
    R1 Creations run in a browser sandbox with no way to host a local file
    server, so there's no way to hand the phone the clip directly — it has to
@@ -733,27 +696,12 @@ async function shareClip(clip) {
   lastShareClip = clip;
   setView('share');
   els.shareStatus.style.display = 'block';
-  els.shareStatus.textContent = 'Preparing…';
+  els.shareStatus.textContent = 'Uploading… 0%';
   els.shareError.style.display = 'none';
   els.shareQrWrap.style.display = 'none';
 
-  let blob = clip.blob;
-  let ext = blob.type.indexOf('mp4') !== -1 ? 'mp4' : 'webm';
-
-  if (ext === 'webm') {
-    try {
-      blob = await transcodeToMp4(blob, (pct) => {
-        els.shareStatus.textContent = `Converting to MP4… ${pct}%`;
-      });
-      ext = 'mp4';
-    } catch (e) {
-      // iPhones can't play webm at all, so this conversion is the whole
-      // point of sharing — but if it fails for some reason, still share the
-      // original webm rather than dead-ending the flow completely.
-      console.error('mp4 conversion failed, sharing original webm:', e);
-    }
-  }
-
+  const blob = clip.blob;
+  const ext = blob.type.indexOf('mp4') !== -1 ? 'mp4' : 'webm';
   const filename = `${clip.mode.toLowerCase()}-${clip.id}.${ext}`;
   const form = new FormData();
   form.append('reqtype', 'fileupload');
