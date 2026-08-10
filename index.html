@@ -684,9 +684,11 @@ async function uploadToTmpfiles(blob, filename) {
   if (!res.ok || !data || data.status !== 'success' || !data.data || !data.data.url) {
     throw new Error(`fallback host also rejected upload — HTTP ${res.status}`);
   }
-  // The bare URL is an HTML landing page with a download link; inserting
-  // /dl/ gives the direct file so scanning the QR opens the clip itself.
-  return data.data.url.replace('https://tmpfiles.org/', 'https://tmpfiles.org/dl/');
+  // tmpfiles.org's real direct-file link embeds a token only present in the
+  // landing page HTML (not the upload API response) — a guessed /dl/ URL
+  // 404s. The plain URL is a real, working landing page with one obvious
+  // Download link, so use that as-is rather than a broken guess.
+  return data.data.url;
 }
 
 let lastShareClip = null;
