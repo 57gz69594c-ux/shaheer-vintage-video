@@ -684,11 +684,18 @@ async function uploadToTmpfiles(blob, filename) {
   if (!res.ok || !data || data.status !== 'success' || !data.data || !data.data.url) {
     throw new Error(`fallback host also rejected upload — HTTP ${res.status}`);
   }
-  // tmpfiles.org's real direct-file link embeds a token only present in the
-  // landing page HTML (not the upload API response) — a guessed /dl/ URL
-  // 404s. The plain URL is a real, working landing page with one obvious
-  // Download link, so use that as-is rather than a broken guess.
-  return data.data.url;
+  // The plain URL from the API is an HTML landing page carrying a
+  // third-party ad script that hijacks the tap on mobile (confirmed: it
+  // redirected a real phone to an unrelated ad domain instead of
+  // downloading). The real direct-file link has a per-view token that's
+  // only present in that page's HTML, not the API response, so fetch it
+  // once ourselves and extract the link — the QR then points straight at
+  // the raw file and the recipient's browser never touches the ad page.
+  const landingRes = await fetch(data.data.url);
+  const landingHtml = await landingRes.text();
+  const match = landingHtml.match(/class="download" href="([^"]+)"/);
+  if (!match) throw new Error('fallback host upload succeeded but no direct link found in response');
+  return match[1];
 }
 
 let lastShareClip = null;
