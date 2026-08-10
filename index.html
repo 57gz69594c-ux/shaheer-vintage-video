@@ -646,7 +646,7 @@ async function uploadViaFetch(form) {
   throw new Error(`server rejected upload — HTTP ${res.status}${text ? ': ' + text.slice(0, 100) : ' (empty response)'}`);
 }
 
-async function uploadWithProgress(form, onProgress) {
+async function uploadToLitterbox(form, onProgress) {
   try {
     return await uploadXHR(form, onProgress);
   } catch (e) {
@@ -658,6 +658,25 @@ async function uploadWithProgress(form, onProgress) {
     onProgress(null);
     return await uploadViaFetch(form);
   }
+}
+
+// litterbox.catbox.moe sits behind Cloudflare, which has been seen to 403
+// uploads specifically from the R1's outbound network/proxy (GETs and
+// identical requests from a normal machine both succeed — this isn't a
+// payload or header problem, it's IP-reputation-based on Cloudflare's side
+// and out of this app's control). tmpfiles.org is the fallback: no
+// Cloudflare in front, permissive CORS, plain multipart POST.
+async function uploadToTmpfiles(blob, filename) {
+  const form = new FormData();
+  form.append('file', blob, filename);
+  const res = await fetch('https://tmpfiles.org/api/v1/upload', { method: 'POST', body: form });
+  const data = await res.json().catch(() => null);
+  if (!res.ok || !data || data.status !== 'success' || !data.data || !data.data.url) {
+    throw new Error(`fallback host also rejected upload — HTTP ${res.status}`);
+  }
+  // The bare URL is an HTML landing page with a download link; inserting
+  // /dl/ gives the direct file so scanning the QR opens the clip itself.
+  return data.data.url.replace('https://tmpfiles.org/', 'https://tmpfiles.org/dl/');
 }
 
 let lastShareClip = null;
@@ -677,21 +696,33 @@ async function shareClip(clip) {
   form.append('time', SHARE_EXPIRY);
   form.append('fileToUpload', clip.blob, filename);
 
+  let url, primaryErr;
   try {
-    const url = await uploadWithProgress(form, (pct) => {
+    url = await uploadToLitterbox(form, (pct) => {
       els.shareStatus.textContent = pct === null ? 'Uploading… (retrying via fallback)' : `Uploading… ${pct}%`;
     });
-    els.shareStatus.style.display = 'none';
-    els.shareUrl.textContent = url;
-    els.shareImg.src = 'https://api.qrserver.com/v1/create-qr-code/?size=170x170&data=' + encodeURIComponent(url);
-    els.shareQrWrap.style.display = 'flex';
   } catch (e) {
-    els.shareStatus.style.display = 'none';
-    const sizeMb = (clip.blob.size / 1024 / 1024).toFixed(1);
-    els.shareErrorMsg.textContent = `${e.message} (clip size: ${sizeMb} MB)`;
-    els.shareError.style.display = 'block';
-    runConnectivityProbe();
+    primaryErr = e;
   }
+
+  if (!url) {
+    try {
+      els.shareStatus.textContent = 'Primary host failed, trying fallback…';
+      url = await uploadToTmpfiles(clip.blob, filename);
+    } catch (fallbackErr) {
+      els.shareStatus.style.display = 'none';
+      const sizeMb = (clip.blob.size / 1024 / 1024).toFixed(1);
+      els.shareErrorMsg.textContent = `${primaryErr.message} — fallback also failed: ${fallbackErr.message} (clip size: ${sizeMb} MB)`;
+      els.shareError.style.display = 'block';
+      runConnectivityProbe();
+      return;
+    }
+  }
+
+  els.shareStatus.style.display = 'none';
+  els.shareUrl.textContent = url;
+  els.shareImg.src = 'https://api.qrserver.com/v1/create-qr-code/?size=170x170&data=' + encodeURIComponent(url);
+  els.shareQrWrap.style.display = 'flex';
 }
 
 // Runs automatically on every share failure. First does plain GET reachability
@@ -725,7 +756,16 @@ async function probeTinyUpload() {
   form.append('time', '1h');
   form.append('fileToUpload', new Blob(['r1-connectivity-probe'], { type: 'text/plain' }), 'probe.txt');
   try {
-    await uploadWithProgress(form, () => {});
+    await uploadToLitterbox(form, () => {});
+    return { ok: true, detail: 'tiny upload succeeded' };
+  } catch (e) {
+    return { ok: false, detail: e.message };
+  }
+}
+
+async function probeTinyFallbackUpload() {
+  try {
+    await uploadToTmpfiles(new Blob(['r1-connectivity-probe'], { type: 'text/plain' }), 'probe.txt');
     return { ok: true, detail: 'tiny upload succeeded' };
   } catch (e) {
     return { ok: false, detail: e.message };
@@ -733,7 +773,8 @@ async function probeTinyUpload() {
 }
 
 async function runConnectivityProbe() {
-  const rowNames = PROBE_TARGETS.map((t) => t.name).concat('litterbox.catbox.moe (tiny POST upload)');
+  const rowNames = PROBE_TARGETS.map((t) => t.name)
+    .concat('litterbox.catbox.moe (tiny POST upload)', 'tmpfiles.org fallback (tiny POST upload)');
   els.shareDiag.innerHTML = rowNames
     .map((name) => `<div><span>${name}</span><span class="pending">testing…</span></div>`)
     .join('');
@@ -742,9 +783,12 @@ async function runConnectivityProbe() {
     const result = await probeOne(PROBE_TARGETS[i].url, 8000);
     rows[i].innerHTML = `<span>${PROBE_TARGETS[i].name}</span><span class="${result.ok ? 'ok' : 'fail'}">${result.ok ? 'reachable' : result.detail}</span>`;
   }
-  const last = rows.length - 1;
+  const primaryIdx = PROBE_TARGETS.length;
   const uploadResult = await probeTinyUpload();
-  rows[last].innerHTML = `<span>${rowNames[last]}</span><span class="${uploadResult.ok ? 'ok' : 'fail'}">${uploadResult.detail}</span>`;
+  rows[primaryIdx].innerHTML = `<span>${rowNames[primaryIdx]}</span><span class="${uploadResult.ok ? 'ok' : 'fail'}">${uploadResult.detail}</span>`;
+  const fallbackIdx = primaryIdx + 1;
+  const fallbackResult = await probeTinyFallbackUpload();
+  rows[fallbackIdx].innerHTML = `<span>${rowNames[fallbackIdx]}</span><span class="${fallbackResult.ok ? 'ok' : 'fail'}">${fallbackResult.detail}</span>`;
 }
 
 els.shareRetryBtn.addEventListener('click', () => { if (lastShareClip) shareClip(lastShareClip); });
