@@ -607,6 +607,30 @@ async function deleteClip(id) {
   renderGallery();
 }
 
+// The R1's webview has no MP4/H.264 MediaRecorder encoder — pickVideoMimeType
+// above already prefers mp4 candidates first, and recording still lands on
+// webm/VP8 in practice, confirming the platform simply lacks the encoder.
+// iOS can't decode VP8/VP9 or parse webm containers at all, so a clip shared
+// to an iPhone needs to actually be re-encoded, not just relabeled. Done
+// client-side at share time via ffmpeg.wasm (loaded from CDN on demand, not
+// bundled, since this is a single static HTML file).
+async function transcodeToMp4(webmBlob, onProgress) {
+  const { FFmpeg } = await import('https://cdn.jsdelivr.net/npm/@ffmpeg/ffmpeg@0.12.10/dist/esm/index.js');
+  const { fetchFile, toBlobURL } = await import('https://cdn.jsdelivr.net/npm/@ffmpeg/util@0.12.1/dist/esm/index.js');
+  const ffmpeg = new FFmpeg();
+  ffmpeg.on('progress', ({ progress }) => onProgress(Math.max(0, Math.min(99, Math.round(progress * 100)))));
+  const baseURL = 'https://cdn.jsdelivr.net/npm/@ffmpeg/core@0.12.6/dist/esm';
+  await ffmpeg.load({
+    coreURL: await toBlobURL(`${baseURL}/ffmpeg-core.js`, 'text/javascript'),
+    wasmURL: await toBlobURL(`${baseURL}/ffmpeg-core.wasm`, 'application/wasm'),
+  });
+  await ffmpeg.writeFile('input.webm', await fetchFile(webmBlob));
+  await ffmpeg.exec(['-i', 'input.webm', '-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '28', '-pix_fmt', 'yuv420p', '-c:a', 'aac', 'output.mp4']);
+  const data = await ffmpeg.readFile('output.mp4');
+  await ffmpeg.terminate();
+  return new Blob([data.buffer], { type: 'video/mp4' });
+}
+
 /* ---------- share via QR (upload to an anonymous, auto-expiring temp host) ----------
    R1 Creations run in a browser sandbox with no way to host a local file
    server, so there's no way to hand the phone the clip directly — it has to
@@ -674,31 +698,20 @@ async function uploadToLitterbox(form, onProgress) {
 // uploads specifically from the R1's outbound network/proxy (GETs and
 // identical requests from a normal machine both succeed — this isn't a
 // payload or header problem, it's IP-reputation-based on Cloudflare's side
-// and out of this app's control). tmpfiles.org is the fallback: no
-// Cloudflare in front, permissive CORS, plain multipart POST.
-async function uploadToTmpfiles(blob, filename) {
-  const form = new FormData();
-  form.append('file', blob, filename);
-  const res = await fetch('https://tmpfiles.org/api/v1/upload', { method: 'POST', body: form });
-  const data = await res.json().catch(() => null);
-  if (!res.ok || !data || data.status !== 'success' || !data.data || !data.data.url) {
-    throw new Error(`fallback host also rejected upload — HTTP ${res.status}`);
-  }
-  // The plain URL from the API is an HTML landing page carrying a
-  // third-party ad script that hijacks the tap on mobile (confirmed: it
-  // redirected a real phone to an unrelated ad domain instead of
-  // downloading). The real direct-file link has a per-view token that's
-  // only present in that page's HTML, not the API response — and the page
-  // itself sends no CORS headers, so it can't be fetched directly from
-  // here. Route the read through r.jina.ai (a read-only fetch proxy that
-  // does send CORS headers) to pull the token server-side, so the QR ends
-  // up pointing straight at the raw file and the ad page is never shown to
-  // the recipient at all.
-  const landingRes = await fetch('https://r.jina.ai/' + data.data.url);
-  const landingText = await landingRes.text();
-  const match = landingText.match(/\((https:\/\/tmpfiles\.org\/dl\/[^)]+)\)/);
-  if (!match) throw new Error('fallback host upload succeeded but no direct link found in response');
-  return match[1];
+// and out of this app's control). filebin.net is the fallback: no ads (a
+// legitimate, reputable EU-hosted temp file service), permissive CORS, and
+// GET on the upload URL 302s straight to a signed S3 link with the real
+// content-type — no landing page for any ad script to hide in.
+async function uploadToFilebin(blob, filename) {
+  const bin = 'r1share-' + (crypto.randomUUID ? crypto.randomUUID() : Date.now() + '-' + Math.random().toString(36).slice(2));
+  const url = `https://filebin.net/${bin}/${filename}`;
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': blob.type || 'application/octet-stream' },
+    body: blob,
+  });
+  if (!res.ok) throw new Error(`fallback host also rejected upload — HTTP ${res.status}`);
+  return url;
 }
 
 let lastShareClip = null;
@@ -707,16 +720,32 @@ async function shareClip(clip) {
   lastShareClip = clip;
   setView('share');
   els.shareStatus.style.display = 'block';
-  els.shareStatus.textContent = 'Uploading… 0%';
+  els.shareStatus.textContent = 'Preparing…';
   els.shareError.style.display = 'none';
   els.shareQrWrap.style.display = 'none';
 
-  const ext = clip.blob.type.indexOf('mp4') !== -1 ? 'mp4' : 'webm';
+  let blob = clip.blob;
+  let ext = blob.type.indexOf('mp4') !== -1 ? 'mp4' : 'webm';
+
+  if (ext === 'webm') {
+    try {
+      blob = await transcodeToMp4(blob, (pct) => {
+        els.shareStatus.textContent = `Converting to MP4… ${pct}%`;
+      });
+      ext = 'mp4';
+    } catch (e) {
+      // iPhones can't play webm at all, so this conversion is the whole
+      // point of sharing — but if it fails for some reason, still share the
+      // original webm rather than dead-ending the flow completely.
+      console.error('mp4 conversion failed, sharing original webm:', e);
+    }
+  }
+
   const filename = `${clip.mode.toLowerCase()}-${clip.id}.${ext}`;
   const form = new FormData();
   form.append('reqtype', 'fileupload');
   form.append('time', SHARE_EXPIRY);
-  form.append('fileToUpload', clip.blob, filename);
+  form.append('fileToUpload', blob, filename);
 
   let url, primaryErr;
   try {
@@ -730,7 +759,7 @@ async function shareClip(clip) {
   if (!url) {
     try {
       els.shareStatus.textContent = 'Primary host failed, trying fallback…';
-      url = await uploadToTmpfiles(clip.blob, filename);
+      url = await uploadToFilebin(blob, filename);
     } catch (fallbackErr) {
       els.shareStatus.style.display = 'none';
       const sizeMb = (clip.blob.size / 1024 / 1024).toFixed(1);
@@ -787,7 +816,7 @@ async function probeTinyUpload() {
 
 async function probeTinyFallbackUpload() {
   try {
-    await uploadToTmpfiles(new Blob(['r1-connectivity-probe'], { type: 'text/plain' }), 'probe.txt');
+    await uploadToFilebin(new Blob(['r1-connectivity-probe'], { type: 'text/plain' }), 'probe.txt');
     return { ok: true, detail: 'tiny upload succeeded' };
   } catch (e) {
     return { ok: false, detail: e.message };
@@ -796,7 +825,7 @@ async function probeTinyFallbackUpload() {
 
 async function runConnectivityProbe() {
   const rowNames = PROBE_TARGETS.map((t) => t.name)
-    .concat('litterbox.catbox.moe (tiny POST upload)', 'tmpfiles.org fallback (tiny POST upload)');
+    .concat('litterbox.catbox.moe (tiny POST upload)', 'filebin.net fallback (tiny POST upload)');
   els.shareDiag.innerHTML = rowNames
     .map((name) => `<div><span>${name}</span><span class="pending">testing…</span></div>`)
     .join('');
