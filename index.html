@@ -620,11 +620,20 @@ async function transcodeToMp4(webmBlob, onProgress) {
   const ffmpeg = new FFmpeg();
   ffmpeg.on('progress', ({ progress }) => onProgress(Math.max(0, Math.min(99, Math.round(progress * 100)))));
   const baseURL = 'https://cdn.jsdelivr.net/npm/@ffmpeg/core@0.12.6/dist/esm';
+  const workerBase = 'https://cdn.jsdelivr.net/npm/@ffmpeg/ffmpeg@0.12.10/dist/esm';
+  // Browsers refuse to construct a module Worker from a cross-origin script
+  // URL directly, so ffmpeg.wasm's worker.js has to be wrapped in a same-
+  // origin blob: URL — but worker.js itself does `import ... from "./const.js"`,
+  // a relative specifier that can't resolve against a path-less blob: URL,
+  // and ffmpeg.wasm never wires up worker.onerror, so that failure doesn't
+  // reject anything — load() just hangs forever with no error and no log.
+  // Rewriting the relative imports to absolute URLs before blob-ifying fixes
+  // it (verified: without this, transcode hung indefinitely with zero output).
+  let workerSrc = await (await fetch(`${workerBase}/worker.js`)).text();
+  workerSrc = workerSrc.replace('"./const.js"', `"${workerBase}/const.js"`).replace('"./errors.js"', `"${workerBase}/errors.js"`);
+  const classWorkerURL = URL.createObjectURL(new Blob([workerSrc], { type: 'text/javascript' }));
   await ffmpeg.load({
-    // Browsers refuse to construct a Worker from a cross-origin script URL
-    // directly; blob-ifying it first (same trick as coreURL/wasmURL below)
-    // makes it same-origin from the browser's point of view.
-    classWorkerURL: await toBlobURL('https://cdn.jsdelivr.net/npm/@ffmpeg/ffmpeg@0.12.10/dist/esm/worker.js', 'text/javascript'),
+    classWorkerURL,
     coreURL: await toBlobURL(`${baseURL}/ffmpeg-core.js`, 'text/javascript'),
     wasmURL: await toBlobURL(`${baseURL}/ffmpeg-core.wasm`, 'application/wasm'),
   });
