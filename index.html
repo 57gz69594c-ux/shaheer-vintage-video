@@ -678,23 +678,36 @@ async function uploadToLitterbox(form, onProgress) {
 // legitimate, reputable EU-hosted temp file service), permissive CORS, and
 // GET on the upload URL 302s straight to a signed S3 link with the real
 // content-type — no landing page for any ad script to hide in.
-async function uploadToFilebin(blob, filename) {
-  const bin = 'r1share-' + (crypto.randomUUID ? crypto.randomUUID() : Date.now() + '-' + Math.random().toString(36).slice(2));
-  const url = `https://filebin.net/${bin}/${filename}`;
-  // fetch() auto-sets the Content-Type header from the Blob's own .type
-  // (e.g. "video/webm") even with no headers specified here — that's not
-  // one of the three CORS-safelisted content-types, so it triggers a
-  // preflight that filebin.net's Access-Control-Allow-Headers doesn't
-  // grant, blocking the request outright in a real browser (curl doesn't
-  // enforce preflight at all, so this passed a curl-only check earlier but
-  // silently never worked). Re-wrapping with a safelisted type avoids the
-  // preflight; filebin sniffs the actual bytes for the real content-type
-  // regardless of what's declared (verified: real webm bytes declared as
-  // text/plain still came back reporting video/webm on download).
-  const safeBlob = new Blob([blob], { type: 'text/plain' });
-  const res = await fetch(url, { method: 'POST', body: safeBlob });
-  if (!res.ok) throw new Error(`fallback host also rejected upload — HTTP ${res.status}`);
-  return url;
+function uploadToFilebin(blob, filename, onProgress) {
+  return new Promise((resolve, reject) => {
+    const bin = 'r1share-' + (crypto.randomUUID ? crypto.randomUUID() : Date.now() + '-' + Math.random().toString(36).slice(2));
+    const url = `https://filebin.net/${bin}/${filename}`;
+    // XHR (not fetch): fetch() has no built-in timeout or upload-progress
+    // event, so a slow/stalled connection left the share screen stuck on
+    // "trying fallback…" forever with zero feedback — indistinguishable
+    // from actually broken. XHR gives both.
+    //
+    // The blob still gets re-wrapped with a CORS-safelisted type: XHR, like
+    // fetch, auto-sets the Content-Type request header from the Blob's own
+    // .type (e.g. "video/webm"), which isn't safelisted and triggers a
+    // preflight that filebin.net's Access-Control-Allow-Headers doesn't
+    // grant — filebin sniffs the actual bytes for the real content-type
+    // regardless of what's declared, so this costs nothing.
+    const safeBlob = new Blob([blob], { type: 'text/plain' });
+    const xhr = new XMLHttpRequest();
+    xhr.open('POST', url);
+    xhr.timeout = 60000;
+    xhr.upload.onprogress = (e) => {
+      if (e.lengthComputable) onProgress(Math.round((e.loaded / e.total) * 100));
+    };
+    xhr.onload = () => {
+      if (xhr.status >= 200 && xhr.status < 300) resolve(url);
+      else reject(new Error(`fallback host also rejected upload — HTTP ${xhr.status}`));
+    };
+    xhr.onerror = () => reject(new Error('fallback host request never reached the server'));
+    xhr.ontimeout = () => reject(new Error('fallback host upload timed out after 60s'));
+    xhr.send(safeBlob);
+  });
 }
 
 let lastShareClip = null;
@@ -726,8 +739,9 @@ async function shareClip(clip) {
 
   if (!url) {
     try {
-      els.shareStatus.textContent = 'Primary host failed, trying fallback…';
-      url = await uploadToFilebin(blob, filename);
+      url = await uploadToFilebin(blob, filename, (pct) => {
+        els.shareStatus.textContent = `Trying fallback host… ${pct}%`;
+      });
     } catch (fallbackErr) {
       els.shareStatus.style.display = 'none';
       const sizeMb = (clip.blob.size / 1024 / 1024).toFixed(1);
@@ -784,7 +798,7 @@ async function probeTinyUpload() {
 
 async function probeTinyFallbackUpload() {
   try {
-    await uploadToFilebin(new Blob(['r1-connectivity-probe'], { type: 'text/plain' }), 'probe.txt');
+    await uploadToFilebin(new Blob(['r1-connectivity-probe'], { type: 'text/plain' }), 'probe.txt', () => {});
     return { ok: true, detail: 'tiny upload succeeded' };
   } catch (e) {
     return { ok: false, detail: e.message };
