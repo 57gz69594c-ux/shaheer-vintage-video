@@ -603,7 +603,7 @@ async function deleteClip(id) {
    briefly become reachable at a URL. litterbox.catbox.moe needs no account
    or API key (nothing to leak in this publicly-served page) and every link
    self-deletes after the chosen window (SHARE_EXPIRY, set above). */
-function uploadWithProgress(form, onProgress) {
+function uploadXHR(form, onProgress) {
   return new Promise((resolve, reject) => {
     const xhr = new XMLHttpRequest();
     xhr.open('POST', 'https://litterbox.catbox.moe/resources/internals/api.php');
@@ -627,11 +627,37 @@ function uploadWithProgress(form, onProgress) {
       // the request never got a response — could be no connectivity, a DNS
       // failure, or the R1's app sandbox blocking the cross-origin request
       // outright (different from a server-side rejection above).
-      reject(new Error(`request never reached the server (status ${xhr.status})${navigator.onLine === false ? ' — device reports offline' : ' — possibly blocked by network/app sandbox, or connection dropped'}`));
+      const err = new Error(`request never reached the server (status ${xhr.status})${navigator.onLine === false ? ' — device reports offline' : ' — possibly blocked by network/app sandbox, or connection dropped'}`);
+      err.networkError = true;
+      reject(err);
     };
     xhr.ontimeout = () => reject(new Error('upload timed out after 60s — connection may be too slow for this clip\'s size'));
     xhr.send(form);
   });
+}
+
+async function uploadViaFetch(form) {
+  const res = await fetch('https://litterbox.catbox.moe/resources/internals/api.php', {
+    method: 'POST',
+    body: form,
+  });
+  const text = (await res.text()).trim();
+  if (res.ok && text.indexOf('http') === 0) return text;
+  throw new Error(`server rejected upload — HTTP ${res.status}${text ? ': ' + text.slice(0, 100) : ' (empty response)'}`);
+}
+
+async function uploadWithProgress(form, onProgress) {
+  try {
+    return await uploadXHR(form, onProgress);
+  } catch (e) {
+    // Some app sandboxes intercept/block XMLHttpRequest uploads specifically
+    // while leaving fetch() untouched. A fetch fallback costs nothing when
+    // the failure is a real outage (fetch fails the same way) but recovers
+    // the sandbox case. No upload-progress events are available via fetch.
+    if (!e.networkError) throw e;
+    onProgress(null);
+    return await uploadViaFetch(form);
+  }
 }
 
 let lastShareClip = null;
@@ -653,7 +679,7 @@ async function shareClip(clip) {
 
   try {
     const url = await uploadWithProgress(form, (pct) => {
-      els.shareStatus.textContent = `Uploading… ${pct}%`;
+      els.shareStatus.textContent = pct === null ? 'Uploading… (retrying via fallback)' : `Uploading… ${pct}%`;
     });
     els.shareStatus.style.display = 'none';
     els.shareUrl.textContent = url;
