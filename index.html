@@ -125,6 +125,7 @@ if (!location.search.includes('v=')) {
 
 <div id="share">
   <h3>Share clip</h3>
+  <div id="shareVersion" style="font-size:9px;opacity:.5;">build: &hellip;</div>
   <div id="shareStatus">Uploading&hellip; 0%</div>
   <div id="shareError" style="display:none;">
     <div id="shareErrorMsg"></div>
@@ -220,6 +221,12 @@ let mode = 16;
 const SHARE_EXPIRY = '1h';
 const SHARE_EXPIRY_LABEL = 'Link expires in 1 hour';
 
+// Bumped by hand on every share-flow change. Shown on the share screen so a
+// stale-cached copy of this app (the R1 has repeatedly kept serving old
+// code well after a fix shipped and was confirmed live) is immediately
+// obvious from the number alone, instead of guessing from error wording.
+const BUILD_VERSION = 'share-v6';
+
 /* ---------- elements ---------- */
 const els = {
   camera: document.getElementById('camera'),
@@ -239,6 +246,7 @@ const els = {
   galleryEmpty: document.getElementById('galleryEmpty'),
   playback: document.getElementById('playback'),
   share: document.getElementById('share'),
+  shareVersion: document.getElementById('shareVersion'),
   shareStatus: document.getElementById('shareStatus'),
   shareError: document.getElementById('shareError'),
   shareErrorMsg: document.getElementById('shareErrorMsg'),
@@ -904,6 +912,7 @@ document.addEventListener('keydown', (e) => {
 
 /* ---------- boot ---------- */
 (async function boot() {
+  els.shareVersion.textContent = 'build: ' + BUILD_VERSION;
   setMode(16);
   try { db = await openDB(); await loadClips(); } catch (e) { showError('Storage init failed: ' + e.message); }
   await initCamera();
