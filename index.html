@@ -681,11 +681,18 @@ async function uploadToLitterbox(form, onProgress) {
 async function uploadToFilebin(blob, filename) {
   const bin = 'r1share-' + (crypto.randomUUID ? crypto.randomUUID() : Date.now() + '-' + Math.random().toString(36).slice(2));
   const url = `https://filebin.net/${bin}/${filename}`;
-  const res = await fetch(url, {
-    method: 'POST',
-    headers: { 'Content-Type': blob.type || 'application/octet-stream' },
-    body: blob,
-  });
+  // fetch() auto-sets the Content-Type header from the Blob's own .type
+  // (e.g. "video/webm") even with no headers specified here — that's not
+  // one of the three CORS-safelisted content-types, so it triggers a
+  // preflight that filebin.net's Access-Control-Allow-Headers doesn't
+  // grant, blocking the request outright in a real browser (curl doesn't
+  // enforce preflight at all, so this passed a curl-only check earlier but
+  // silently never worked). Re-wrapping with a safelisted type avoids the
+  // preflight; filebin sniffs the actual bytes for the real content-type
+  // regardless of what's declared (verified: real webm bytes declared as
+  // text/plain still came back reporting video/webm on download).
+  const safeBlob = new Blob([blob], { type: 'text/plain' });
+  const res = await fetch(url, { method: 'POST', body: safeBlob });
   if (!res.ok) throw new Error(`fallback host also rejected upload — HTTP ${res.status}`);
   return url;
 }
