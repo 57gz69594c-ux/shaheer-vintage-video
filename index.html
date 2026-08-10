@@ -688,12 +688,15 @@ async function uploadToTmpfiles(blob, filename) {
   // third-party ad script that hijacks the tap on mobile (confirmed: it
   // redirected a real phone to an unrelated ad domain instead of
   // downloading). The real direct-file link has a per-view token that's
-  // only present in that page's HTML, not the API response, so fetch it
-  // once ourselves and extract the link — the QR then points straight at
-  // the raw file and the recipient's browser never touches the ad page.
-  const landingRes = await fetch(data.data.url);
-  const landingHtml = await landingRes.text();
-  const match = landingHtml.match(/class="download" href="([^"]+)"/);
+  // only present in that page's HTML, not the API response — and the page
+  // itself sends no CORS headers, so it can't be fetched directly from
+  // here. Route the read through r.jina.ai (a read-only fetch proxy that
+  // does send CORS headers) to pull the token server-side, so the QR ends
+  // up pointing straight at the raw file and the ad page is never shown to
+  // the recipient at all.
+  const landingRes = await fetch('https://r.jina.ai/' + data.data.url);
+  const landingText = await landingRes.text();
+  const match = landingText.match(/\((https:\/\/tmpfiles\.org\/dl\/[^)]+)\)/);
   if (!match) throw new Error('fallback host upload succeeded but no direct link found in response');
   return match[1];
 }
